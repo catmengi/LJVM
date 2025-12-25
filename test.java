@@ -20,40 +20,20 @@ class test_app{
 
 	public static void main(String[] args){
 
-		/*field = test(512);
-		byte ln = 10;
+		field = test(512);
 		s = "Fuck";
-
-		byte bytes[] = new byte[32];
-		byte j = 67;
-		for(byte i = 0; i < 31; i++){
-				bytes[i] = j;
-		}
-		bytes[31] = ln;
-
-		try {
-			System.out.write(bytes);
-		} catch (IOException e){
-			debug_segfault(null);
-		}
 
 		try {
 			expection_test();
 		} catch(IOException e){
-			byte nj = 70;
-			byte[] new_bytes = new byte[16];
-			for(byte i = 0; i < 16; i++){
-				new_bytes[i] = nj;
-			}
-			new_bytes[15] = ln;
-
-			try{
-				System.out.write(new_bytes);
-			}catch(IOException ne){}
+			System.out.println("\n ============= \nExpection test successful!\n ============= \n");
 		}
-		*/
+
+		
 
 		System.out.println("Hello world!");
+		System.out.println(s);
+		System.out.println();
 		System.out.println(0.1234f);
 		System.out.println(0.1234567890123456789);
 		System.out.println(1234);

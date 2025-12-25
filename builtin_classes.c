@@ -38,6 +38,7 @@ static jvm_error_t printstream_printlong(jvm_frame_t* frame);
 static jvm_error_t printstream_printobject(jvm_frame_t* frame);
 static jvm_error_t printstream_printstring(jvm_frame_t* frame);
 static jvm_error_t printstream_println(jvm_frame_t* frame);
+static jvm_error_t printstream_printlnvoid(jvm_frame_t* frame);
 
 classlinker_normalclass_t java_lang_Object_info = {
     .methods_count = 1,
@@ -170,7 +171,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .name = "output_stream",
         },
     },
-    .methods_count = 20,
+    .methods_count = 21,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -241,7 +242,12 @@ classlinker_normalclass_t java_io_PrintStream_info = {
         },
 
 
-
+        {
+            .name = "println",
+            .raw_description = "()V",
+            .frame_descriptor.locals_count = 1,
+            .fn = printstream_printlnvoid,
+        },
         {
             .name = "println",
             .raw_description = "(Z)V",
@@ -750,6 +756,11 @@ static jvm_error_t printstream_println(jvm_frame_t* frame){
 
 exit:
     return err;
+}
+
+static jvm_error_t printstream_printlnvoid(jvm_frame_t* frame){
+    *(uint32_t*)frame->locals[1].value = '\n';
+    return printstream_printchar(frame);
 }
 
 static jvm_error_t string_native_utf8_init(jvm_frame_t* frame){
