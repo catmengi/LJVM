@@ -39,6 +39,8 @@ objectmanager_object_t* objectmanager_new_class_object(jvm_frame_t* frame,
         }
     }
 
+    new->jvm = frame->jvm;
+
     return new;
 }
 
@@ -60,6 +62,8 @@ objectmanager_object_t* objectmanager_new_array_object(jvm_frame_t* frame, jvm_v
     for(unsigned i = 0; i < size; i++){
         array_object->elements[i].type = type;
     }
+
+    new->jvm = frame->jvm;
 
     return new;
 }
@@ -94,9 +98,12 @@ classlinker_field_t* objectmanager_class_object_get_field(objectmanager_class_ob
     return NULL;
 }
 
-classlinker_method_t* objectmanager_class_object_get_method(objectmanager_class_object_t* class_object,
+classlinker_method_t* objectmanager_object_get_method(objectmanager_object_t* object,
                                                             char* name, char* description){
-    return classlinker_find_method(class_object->class,name,description);
+
+    classlinker_class_t* where_to_look = object->type == EJOMOT_CLASS ? ((objectmanager_class_object_t*)object->data)->class : classlinker_find_class(object->jvm->linker,"java/lang/Object");
+    
+    return classlinker_find_method(where_to_look,name,description);
 }
 
 bool objectmanager_class_object_is_compatible_to(objectmanager_class_object_t* class_object, classlinker_class_t* class){

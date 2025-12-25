@@ -5,6 +5,7 @@
 #include "jvm.h"
 #include "lb_endian.h"
 #include "list.h"
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -99,21 +100,21 @@ classlinker_bytecode_t* parse_code(char* attr_data,classlinker_instance_t* linke
 
         memcpy(code->code,attr_data,code->code_length); attr_data += code->code_length;
 
-        code->expectiontable_size = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
+        code->exceptiontable_size = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
 
-        code->expection_table = arena_calloc(linker->arena,code->expectiontable_size,sizeof(*code->expection_table));
-        if(code->expection_table || code->expectiontable_size == 0){
-            for(unsigned i = 0; i < code->expectiontable_size; i++){
-                code->expection_table[i].start_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
-                code->expection_table[i].end_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
-                code->expection_table[i].handler_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
+        code->exception_table = arena_calloc(linker->arena,code->exceptiontable_size,sizeof(*code->exception_table));
+        if(code->exception_table || code->exceptiontable_size == 0){
+            for(unsigned i = 0; i < code->exceptiontable_size; i++){
+                code->exception_table[i].start_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
+                code->exception_table[i].end_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
+                code->exception_table[i].handler_pc = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
 
                 uint16_t catch_index = be16_to_cpu(*(uint16_t*)attr_data); attr_data += sizeof(uint16_t);
                 classlinker_normalclass_t* class_info = method->class->info;
 
                 if(catch_index > 0){
-                    code->expection_table[i].expection_class = class_info->constant_pool.constants[catch_index - 1].constant_value;
-                } else code->expection_table[i].expection_class = NULL;
+                    code->exception_table[i].exception_class = class_info->constant_pool.constants[catch_index - 1].constant_value;
+                } else code->exception_table[i].exception_class = NULL;
             }
         }
 
@@ -497,7 +498,7 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
             
             size_t static_fields = 0;
             size_t fields = 0;
-            for(unsigned i = 0; i <raw_class->fields_count; i++){
+            for(unsigned i = 0; i < raw_class->fields_count; i++){
                 if((raw_class->fields[i].access_flags & ACC_STATIC) == ACC_STATIC)
                     static_fields++;
                 else fields++;
@@ -648,9 +649,9 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
                 if(new_method->frame_descriptor.locals_count == 0){
                     new_method->frame_descriptor.locals_count = new_method->frame_descriptor.arguments_count; //This is for thoose who lazy to add locals count
                             
-                    if((new_method->flags & ACC_STATIC) != ACC_STATIC){
-                            new_method->frame_descriptor.locals_count++;
-                    }
+                }
+                if((new_method->flags & ACC_STATIC) != ACC_STATIC){
+                        new_method->frame_descriptor.locals_count++;
                 }      
 
             }
@@ -670,11 +671,10 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
                 new_method->class = linkable_class;
                 if(new_method->frame_descriptor.locals_count == 0){
                     new_method->frame_descriptor.locals_count = new_method->frame_descriptor.arguments_count; //This is for thoose who lazy to add locals count
-                        
-                    if((new_method->flags & ACC_STATIC) != ACC_STATIC){
-                            new_method->frame_descriptor.locals_count++;
-                    }
                 }                
+                if((new_method->flags & ACC_STATIC) != ACC_STATIC){
+                        new_method->frame_descriptor.locals_count++;
+                }
             }
         }
     }
@@ -699,6 +699,14 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
                 }else printf("%s: class %s have interface pointing to 0\n",__PRETTY_FUNCTION__,linkable_class->this_name);
             }
         }
+    }
+
+    //Step 6: initialising monitors
+    list_for_each_entry(linkable_class, &linker->loaded_classes,list){
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&linkable_class->monitor,&attr);
     }
 exit:
     return err;

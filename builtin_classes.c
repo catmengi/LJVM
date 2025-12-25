@@ -3,6 +3,7 @@
 #include "class_loader.h"
 #include "jvm.h"
 #include "jvm_internal.h"
+#include "jvm_method.h"
 #include "list.h"
 #include "object.h"
 
@@ -26,6 +27,17 @@ static jvm_error_t ioexception_init(jvm_frame_t* frame);
 static jvm_error_t outputstream_close(jvm_frame_t* frame);
 static jvm_error_t outputstream_flush(jvm_frame_t* frame);
 static jvm_error_t outputstream_writebytes(jvm_frame_t* frame);
+
+static jvm_error_t printstream_printbool(jvm_frame_t* frame);
+static jvm_error_t printstream_printchar(jvm_frame_t* frame);
+static jvm_error_t printstream_printchararray(jvm_frame_t* frame);
+static jvm_error_t printstream_printdouble(jvm_frame_t* frame);
+static jvm_error_t printstream_printfloat(jvm_frame_t* frame);
+static jvm_error_t printstream_printint(jvm_frame_t* frame);
+static jvm_error_t printstream_printlong(jvm_frame_t* frame);
+static jvm_error_t printstream_printobject(jvm_frame_t* frame);
+static jvm_error_t printstream_printstring(jvm_frame_t* frame);
+static jvm_error_t printstream_println(jvm_frame_t* frame);
 
 classlinker_normalclass_t java_lang_Object_info = {
     .methods_count = 1,
@@ -57,8 +69,7 @@ classlinker_normalclass_t java_lang_String_info = {
             .name = "<init>",
             .raw_description = "(*)V",
             .fn = string_native_utf8_init,
-            .frame_descriptor.arguments_count = 2,
-            .flags = ACC_STATIC,
+            .frame_descriptor.arguments_count = 1,
         }
     },
     .fields_count = 1,
@@ -82,8 +93,8 @@ classlinker_normalclass_t java_io_IOException_info = {
         {
             .name = "<clinit>",
             .raw_description = "()V",
-            .flags = ACC_STATIC,
             .fn = ioexception_clinit,
+            .flags = ACC_STATIC,
         },
         {
             .name = "<init>",
@@ -111,9 +122,7 @@ classlinker_normalclass_t java_io_OutputStream_info = {
         {
             .name = "<init>",
             .raw_description = "()V",
-            .frame_descriptor.arguments_count = 1,
             .fn = outputstream_init,
-            .flags = ACC_STATIC,
         },
         {
             .name = "<init>",
@@ -161,20 +170,131 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .name = "output_stream",
         },
     },
-    .methods_count = 2,
+    .methods_count = 20,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
             .raw_description = "()V",
-            .flags = ACC_STATIC,
             .fn = printstream_clinit,
+            .flags = ACC_STATIC,
+
         },
         {
             .name = "<init>",
             .raw_description = "(Ljava/io/OutputStream;)V",
-            .frame_descriptor.arguments_count = 2,
+            .frame_descriptor.arguments_count = 1,
             .fn = printstream_init,
-            .flags = ACC_STATIC,
+        },
+        {
+            .name = "print",
+            .raw_description = "(Z)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printbool,
+        },
+            {
+            .name = "print",
+            .raw_description = "(C)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printchar,
+        },
+        {
+            .name = "print",
+            .raw_description = "([C)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printchararray,
+        },
+        {
+            .name = "print",
+            .raw_description = "(D)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printdouble,
+        },
+        {
+            .name = "print",
+            .raw_description = "(F)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printfloat,
+        },
+        {
+            .name = "print",
+            .raw_description = "(I)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printint,
+        },
+        {
+            .name = "print",
+            .raw_description = "(J)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printlong,
+        },
+        {
+            .name = "print",
+            .raw_description = "(Ljava/lang/Object;)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printobject,
+        },
+        {
+            .name = "print",
+            .raw_description = "(Ljava/lang/String;)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_printstring,
+        },
+
+
+
+        {
+            .name = "println",
+            .raw_description = "(Z)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+            {
+            .name = "println",
+            .raw_description = "(C)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "([C)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(D)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(F)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(I)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(J)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(Ljava/lang/Object;)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
+        },
+        {
+            .name = "println",
+            .raw_description = "(Ljava/lang/String;)V",
+            .frame_descriptor.arguments_count = 1,
+            .fn = printstream_println,
         },
     }
 };
@@ -206,6 +326,7 @@ classlinker_normalclass_t java_lang_System_info = {
             .raw_description = "()V",
             .fn = system_clinit,
             .flags = ACC_STATIC,
+
         },
     }
 };
@@ -283,8 +404,8 @@ static jvm_error_t system_clinit(jvm_frame_t* frame){
     *(void**)field_out->value.value = out_stream;
     *(void**)field_err->value.value = out_stream;
 
-    classlinker_method_t* console_init = objectmanager_class_object_get_method(objectmanager_get_class_object_info(console_stream),"<init>", "(I)V");
-    classlinker_method_t* outerr_init = objectmanager_class_object_get_method(objectmanager_get_class_object_info(out_stream),"<init>", "(Ljava/io/OutputStream;)V");
+    classlinker_method_t* console_init = objectmanager_object_get_method(console_stream,"<init>", "(I)V");
+    classlinker_method_t* outerr_init = objectmanager_object_get_method(out_stream,"<init>", "(Ljava/io/OutputStream;)V");
  
     FAIL_SET_JUMP(console_init,err,JVM_NOTFOUND,exit);
     FAIL_SET_JUMP(outerr_init,err,JVM_NOTFOUND,exit);
@@ -415,6 +536,222 @@ static jvm_error_t printstream_init(jvm_frame_t* frame){
     return JVM_OK;
 }
 
+static jvm_error_t printstream_common(jvm_frame_t* frame, objectmanager_object_t* byte_array_object){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* self_object = *(void**)frame->locals[0].value;
+
+    classlinker_field_t* output_stream = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self_object), "output_stream");
+    FAIL_SET_JUMP(output_stream,err,JVM_NOTFOUND,exit);
+
+    objectmanager_object_t* output_stream_object = *(void**)output_stream->value.value;
+    FAIL_SET_JUMP(output_stream,err,JVM_UNKNOWN,exit);
+
+    classlinker_method_t* write_method = objectmanager_object_get_method(output_stream_object,"write", "([B)V");
+    FAIL_SET_JUMP(write_method,err,JVM_NOTFOUND,exit);
+
+    jvm_value_t args[2] = {{EJVT_REFERENCE},{EJVT_REFERENCE}};
+    *(void**)args[0].value = output_stream_object;
+    *(void**)args[1].value = byte_array_object;
+
+    err = jvm_invoke(frame->jvm,frame,write_method,sizeof(args) / sizeof(args[0]),args);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printbool(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    uint32_t boolean = *(uint32_t*)frame->locals[1].value;
+
+    char* Coutput_str = boolean != 0 ? "true" : "false";
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,strlen(Coutput_str));
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    for(unsigned i = 0; i < byte_array->count; i++){
+        *(uint8_t*)byte_array->elements[i].value = Coutput_str[i];
+    }
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printchar(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    uint32_t character = *(uint32_t*)frame->locals[1].value;
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,1);
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    *(uint32_t*)byte_array->elements[0].value = character;
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printchararray(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* byte_array_object = *(void**)frame->locals[1].value;
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;   
+}
+
+static jvm_error_t printstream_printdouble(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    double value = *(typeof(value)*)frame->locals[1].value;
+
+    char Coutput_str[33] = {0};
+    snprintf(Coutput_str,sizeof(Coutput_str) - 1,"%lf",value);
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,strlen(Coutput_str));
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    for(unsigned i = 0; i < byte_array->count; i++){
+        *(uint8_t*)byte_array->elements[i].value = Coutput_str[i];
+    }
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printfloat(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    float value = *(typeof(value)*)frame->locals[1].value;
+
+    char Coutput_str[33] = {0};
+    snprintf(Coutput_str,sizeof(Coutput_str) - 1,"%f",value);
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,strlen(Coutput_str));
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    for(unsigned i = 0; i < byte_array->count; i++){
+        *(uint8_t*)byte_array->elements[i].value = Coutput_str[i];
+    }
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printint(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    size_t value = *(uint32_t*)frame->locals[1].value;
+
+    char Coutput_str[33] = {0};
+    snprintf(Coutput_str,sizeof(Coutput_str) - 1,"%zu",value);
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,strlen(Coutput_str));
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    for(unsigned i = 0; i < byte_array->count; i++){
+        *(uint8_t*)byte_array->elements[i].value = Coutput_str[i];
+    }
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printlong(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    uint64_t value = *(uint64_t*)frame->locals[1].value;
+
+    char Coutput_str[33] = {0};
+    snprintf(Coutput_str,sizeof(Coutput_str) - 1,"%ld",value);
+
+    objectmanager_object_t* byte_array_object = objectmanager_new_array_object(frame, EJVT_BYTE,strlen(Coutput_str));
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OOM,exit);
+
+    objectmanager_array_object_t* byte_array = objectmanager_get_array_object_info(byte_array_object);
+    for(unsigned i = 0; i < byte_array->count; i++){
+        *(uint8_t*)byte_array->elements[i].value = Coutput_str[i];
+    }
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+static jvm_error_t printstream_printobject(jvm_frame_t* frame){
+    TODO("print object!");
+    *(int*)1 = 0;
+}
+
+static jvm_error_t printstream_printstring(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* string = *(void**)frame->locals[1].value;
+
+    objectmanager_object_t* byte_array_object = *(void**)objectmanager_class_object_get_field(objectmanager_get_class_object_info(string), "UTF8_string")->value.value;
+    FAIL_SET_JUMP(byte_array_object,err,JVM_OPCODE_INVALID,exit);
+
+    err = printstream_common(frame,byte_array_object);
+
+exit:
+    return err;
+}
+
+struct{
+    char* description;
+    jvm_method_t method;
+}printstream_println_dispach_table[] = {
+    {"(Z)V",printstream_printbool},
+    {"(C)V",printstream_printchar,},
+    {"([C)V",printstream_printchararray},
+    {"(D)V",printstream_printdouble,},
+    {"(F)V",printstream_printfloat,},
+    {"(I)V",printstream_printint},
+    {"(J)V",printstream_printlong},
+    {"(Ljava/lang/Object;)V",printstream_printobject},
+    {"(Ljava/lang/String;)V",printstream_printstring},
+};
+static jvm_error_t printstream_println(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    char* description = frame->method->raw_description; //I was just tooooooooo lazy to copy past this shit with println
+    jvm_method_t to_call = NULL;
+
+    for(unsigned i = 0; i < sizeof(printstream_println_dispach_table) / sizeof(printstream_println_dispach_table[0]); i++){
+        if(strcmp(printstream_println_dispach_table[i].description,description) == 0){
+            to_call = printstream_println_dispach_table[i].method;
+            break;
+        }
+    }
+    FAIL_SET_JUMP(to_call,err,JVM_UNKNOWN,exit);
+    FAIL_SET_JUMP(to_call(frame) == JVM_OK,err,JVM_UNKNOWN,exit);
+
+    *(uint32_t*)frame->locals[1].value = '\n';
+    err = printstream_printchar(frame);
+
+exit:
+    return err;
+}
+
 static jvm_error_t string_native_utf8_init(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
     
@@ -423,7 +760,7 @@ static jvm_error_t string_native_utf8_init(jvm_frame_t* frame){
 
     jvm_value_t UTF8_string = {EJVT_REFERENCE};
     
-    objectmanager_object_t* UTF8_array = objectmanager_new_array_object(frame, EJVT_CHAR, strlen(native_utf8) - 1);
+    objectmanager_object_t* UTF8_array = objectmanager_new_array_object(frame, EJVT_BYTE, strlen(native_utf8));
     FAIL_SET_JUMP(UTF8_array,err,JVM_OOM,exit);
 
     objectmanager_array_object_t* array_itself = objectmanager_get_array_object_info(UTF8_array);

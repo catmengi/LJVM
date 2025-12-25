@@ -116,8 +116,8 @@ static jvm_opcode_executor_t opcode_executors[211] = {
     [OP_ATHROW] = {0,NULL,jvm_athrow_opcode},
 
     [OP_INVOKESTATIC] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_invokestatic_opcode},
-    [OP_INVOKESPECIAL] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_invokeVS_opcode},
-    [OP_INVOKEVIRTUAL] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_invokeVS_opcode},
+    [OP_INVOKESPECIAL] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_invokespecial_opcode},
+    [OP_INVOKEVIRTUAL] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_invokevirtual_opcode},
 };
 
 uint32_t nextby(uint32_t value, uint32_t by){
@@ -283,8 +283,8 @@ jvm_error_t jvm_throw(jvm_frame_t* frame, objectmanager_object_t* exception_obje
         classlinker_method_t* cur_method = cur->method;
         if((cur_method->flags & ACC_NATIVE) != ACC_NATIVE && cur_method->not_builtin == true){
             classlinker_bytecode_t* bytecode = cur_method->userctx;
-            for(unsigned i = 0; i < bytecode->expectiontable_size; i++){
-                classlinker_expectiontable_t* exception = &bytecode->expection_table[i];
+            for(unsigned i = 0; i < bytecode->exceptiontable_size; i++){
+                classlinker_exceptiontable_t* exception = &bytecode->exception_table[i];
 
                 if(exception->start_pc <= cur->pc && exception->end_pc >= cur->pc){
                     cur->pc = exception->handler_pc - 1;
@@ -335,7 +335,7 @@ jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, c
         objectmanager_object_t* string_arg = objectmanager_new_class_object(&frame,classlinker_find_class(instance->linker,"java/lang/String"));
         FAIL_SET_JUMP(string_arg,err,JVM_OOM,exit);
 
-        classlinker_method_t* init = objectmanager_class_object_get_method(objectmanager_get_class_object_info(string_arg),"<init>", "(*)V");
+        classlinker_method_t* init = objectmanager_object_get_method(string_arg,"<init>", "(*)V");
         FAIL_SET_JUMP(init,err,JVM_NOTFOUND,exit);
 
         jvm_value_t init_args[] = {{EJVT_REFERENCE},{EJVT_REFERENCE}};

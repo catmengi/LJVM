@@ -5,6 +5,7 @@
 
 #include "jvm.h"
 #include "jvm_internal.h"
+#include "jvm_method.h"
 #include "object.h"
 
 #include <stdint.h>
@@ -60,7 +61,7 @@ jvm_error_t jvm_ldc_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_
                 objectmanager_object_t* string = objectmanager_new_class_object(frame,classlinker_find_class(frame->jvm->linker,"java/lang/String"));
                 FAIL_SET_JUMP(string,err,JVM_OOM,exit);
 
-                classlinker_method_t* init_method = objectmanager_class_object_get_method(objectmanager_get_class_object_info(string),"<init>","(*)V");
+                classlinker_method_t* init_method = objectmanager_object_get_method(string,"<init>","(*)V");
                 FAIL_SET_JUMP(init_method,err,JVM_NOTFOUND,exit);
 
                 jvm_value_t args[2] = {{EJVT_REFERENCE},{EJVT_NATIVEPTR}};
@@ -678,7 +679,7 @@ jvm_error_t jvm_dup_opcodes(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker
     return JVM_OK;
 }
 
-jvm_error_t jvm_invokeVS_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_class_t* cur_class, unsigned nargs, void* args[]){
+jvm_error_t jvm_invokevirtual_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_class_t* cur_class, unsigned nargs, void* args[]){
     jvm_error_t err = JVM_OK;
 
     classlinker_normalclass_t* class_info = cur_class->info;
@@ -695,13 +696,45 @@ jvm_error_t jvm_invokeVS_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classli
     jvm_value_t object = frame->stack.stack[--frame->stack.sp];
     method_args[0] = object;
 
-    objectmanager_class_object_t* class_object = objectmanager_get_class_object_info(*(void**)object.value);
+    objectmanager_object_t* object_itself = *(void**)object.value;
+    objectmanager_class_object_t* class_object = objectmanager_get_class_object_info(object_itself);
     FAIL_SET_JUMP(class_object,err,JVM_OPPARAM_INVALID,exit);
 
     FAIL_SET_JUMP(objectmanager_class_object_is_compatible_to(class_object,method_ref->class),err,JVM_OPPARAM_INVALID,exit);
 
-    classlinker_method_t* lookedup_method = objectmanager_class_object_get_method(class_object, method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
+    classlinker_method_t* lookedup_method = objectmanager_object_get_method(object_itself, method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
     FAIL_SET_JUMP(lookedup_method,err,JVM_NOTFOUND,exit);
+
+    FAIL_SET_JUMP(strcmp(lookedup_method->name,"<init>") != 0 && strcmp(lookedup_method->name,"<clinit>") != 0, err,JVM_OPPARAM_INVALID,exit);
+
+    jvm_error_t invoke_err = jvm_invoke(frame->jvm,frame,lookedup_method,class_method->frame_descriptor.arguments_count + 1,method_args);
+    FAIL_SET_JUMP(invoke_err == JVM_OK,err,invoke_err,exit);
+
+exit:
+    return err;
+}
+
+jvm_error_t jvm_invokespecial_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_class_t* cur_class, unsigned nargs, void* args[]){
+    jvm_error_t err = JVM_OK;
+
+    classlinker_normalclass_t* class_info = cur_class->info;
+
+    classlinker_fmimref_t* method_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
+    classlinker_method_t* class_method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
+    FAIL_SET_JUMP(class_method,err,JVM_NOTFOUND,exit);
+
+    jvm_value_t* method_args = alloca((class_method->frame_descriptor.arguments_count + 1) * sizeof(*method_args));
+
+    for(unsigned i = class_method->frame_descriptor.arguments_count + 1; i-- > 1;){
+        method_args[i] = frame->stack.stack[--frame->stack.sp];
+    }
+    jvm_value_t object = frame->stack.stack[--frame->stack.sp];
+    method_args[0] = object;
+
+    classlinker_method_t* lookedup_method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
+    FAIL_SET_JUMP(lookedup_method,err,JVM_NOTFOUND,exit);
+
+    FAIL_SET_JUMP(strcmp(lookedup_method->name,"<init>") == 0 || strcmp(lookedup_method->name,"<clinit>") == 0, err,JVM_OPPARAM_INVALID,exit);
 
     jvm_error_t invoke_err = jvm_invoke(frame->jvm,frame,lookedup_method,class_method->frame_descriptor.arguments_count + 1,method_args);
     FAIL_SET_JUMP(invoke_err == JVM_OK,err,invoke_err,exit);

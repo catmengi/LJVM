@@ -19,7 +19,8 @@ class test_app{
 	}
 
 	public static void main(String[] args){
-		field = test(512);
+
+		/*field = test(512);
 		byte ln = 10;
 		s = "Fuck";
 
@@ -50,7 +51,12 @@ class test_app{
 				System.out.write(new_bytes);
 			}catch(IOException ne){}
 		}
+		*/
 
-		debug_segfault(args);
+		System.out.println("Hello world!");
+		System.out.println(0.1234f);
+		System.out.println(0.1234567890123456789);
+		System.out.println(1234);
+		System.out.println(5456677l);
 	}
 }

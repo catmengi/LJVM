@@ -32,6 +32,7 @@ typedef enum{
 typedef struct classlinker_class_t classlinker_class_t;
 typedef struct classlinker_class_t{
     struct list_head list;
+    pthread_mutex_t monitor;
 
     classloader_class_t* raw_class; //Temporary pointer, used only while linking
 
@@ -64,8 +65,8 @@ typedef struct{
     uint16_t end_pc;
     uint16_t handler_pc;
     
-    classlinker_class_t* expection_class; //NULL if any
-}classlinker_expectiontable_t;
+    classlinker_class_t* exception_class; //NULL if any
+}classlinker_exceptiontable_t;
 
 typedef struct{    
     uint16_t stack_size;
@@ -74,8 +75,8 @@ typedef struct{
     uint32_t code_length;
     uint8_t* code;
 
-    uint16_t expectiontable_size;
-    classlinker_expectiontable_t* expection_table;
+    uint16_t exceptiontable_size;
+    classlinker_exceptiontable_t* exception_table;
 }classlinker_bytecode_t;
 
 typedef struct{
