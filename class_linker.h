@@ -165,8 +165,8 @@ classlinker_instance_t* classlinker_new();
 classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader_instance_t* loader);
 classlinker_class_t* classlinker_find_class(classlinker_instance_t* linker, char* name);
 
-classlinker_method_t* classlinker_find_method(classlinker_class_t* class, char* name, char* description);
-classlinker_field_t* classlinker_find_staticfield(classlinker_class_t* class, char* field_name);
+classlinker_method_t* classlinker_find_method(jvm_frame_t* frame, classlinker_class_t* class, char* name, char* description);
+classlinker_field_t* classlinker_find_staticfield(jvm_frame_t* frame, classlinker_class_t* class, char* field_name);
 
 classlinker_class_t* classlinker_find_method_class(classlinker_class_t* class, char* name, char* description);
 

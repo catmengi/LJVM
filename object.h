@@ -40,11 +40,11 @@ objectmanager_object_t* objectmanager_new_array_object(jvm_frame_t* frame, jvm_v
 
 bool objectmanager_class_object_is_compatible_to(objectmanager_class_object_t* class_object, classlinker_class_t* class);
 
-classlinker_method_t* objectmanager_object_get_method(objectmanager_object_t* object,
+classlinker_method_t* objectmanager_object_get_method(jvm_frame_t* frame, objectmanager_object_t* object,
                                                             char* name, char* description);
 
-classlinker_field_t* objectmanager_class_object_get_field(
-                        objectmanager_class_object_t* class_object,char* name);
+classlinker_field_t* objectmanager_class_object_get_field(jvm_frame_t* frame, objectmanager_class_object_t* class_object,
+                                                          char* name);
 
 objectmanager_class_object_t* objectmanager_get_class_object_info(objectmanager_object_t* object);
 objectmanager_array_object_t* objectmanager_get_array_object_info(objectmanager_object_t* object);

@@ -27,6 +27,8 @@ static jvm_opcode_executor_t opcode_executors[211] = {
 
     [OP_PUTSTATIC] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_putstatic_opcode},
     [OP_GETSTATIC] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_getstatic_opcode},
+    [OP_GETFIELD] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_getfield_opcode},
+    [OP_PUTFIELD] = {1,(jvm_opcode_argtype_t[]){EJOT_U16},jvm_putfield_opcode},
 
     [OP_IADD] = {0,NULL,jvm_add_opcodes},
     [OP_LADD] = {0,NULL,jvm_add_opcodes},
@@ -157,7 +159,7 @@ jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
     classlinker_class_t* class = NULL;
     list_for_each_entry(class,&linker->loaded_classes,list){
         {
-            jvm_invokestatic(instance,NULL,classlinker_find_method(class, "<clinit>", NULL),0,NULL);
+            jvm_invokestatic(instance,NULL,classlinker_find_method(NULL,class, "<clinit>", NULL),0,NULL);
         }
     }
 
@@ -277,7 +279,6 @@ jvm_error_t jvm_throw(jvm_frame_t* frame, objectmanager_object_t* exception_obje
     objectmanager_class_object_t* exception_cobject = objectmanager_get_class_object_info(exception_object);
 
     FAIL_SET_JUMP(exception_cobject,err,JVM_OPCODE_INVALID,exit);
-    err = JVM_METHOD_RETURN;
 
     for(jvm_frame_t* cur = frame; cur; cur = cur->previous_frame){
         classlinker_method_t* cur_method = cur->method;
@@ -297,6 +298,7 @@ jvm_error_t jvm_throw(jvm_frame_t* frame, objectmanager_object_t* exception_obje
                 }
             }
         }
+        err = JVM_METHOD_RETURN; //Set err to JVM_METHOD_RETURN if there is no handler for this expection in frame
     }
 
 exit:
@@ -320,12 +322,12 @@ jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, c
     classlinker_class_t* found_class = classlinker_find_class(instance->linker, class);
     FAIL_SET_JUMP(found_class,err,JVM_NOTFOUND,exit);
 
-    classlinker_method_t* method = classlinker_find_method(found_class,"main","([Ljava/lang/String;)V");
-    FAIL_SET_JUMP(method,err,JVM_NOTFOUND,exit);
-
     jvm_frame_t frame = {
         .jvm = instance,
     };
+
+    classlinker_method_t* method = classlinker_find_method(&frame,found_class,"main","([Ljava/lang/String;)V");
+    FAIL_SET_JUMP(method,err,JVM_NOTFOUND,exit);
 
     objectmanager_object_t* args_object = objectmanager_new_array_object(&(jvm_frame_t){instance}, EJVT_REFERENCE, nargs);
     FAIL_SET_JUMP(args_object,err,JVM_OOM,exit);
@@ -335,7 +337,7 @@ jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, c
         objectmanager_object_t* string_arg = objectmanager_new_class_object(&frame,classlinker_find_class(instance->linker,"java/lang/String"));
         FAIL_SET_JUMP(string_arg,err,JVM_OOM,exit);
 
-        classlinker_method_t* init = objectmanager_object_get_method(string_arg,"<init>", "(*)V");
+        classlinker_method_t* init = objectmanager_object_get_method(&frame,string_arg,"<init>", "(*)V");
         FAIL_SET_JUMP(init,err,JVM_NOTFOUND,exit);
 
         jvm_value_t init_args[] = {{EJVT_REFERENCE},{EJVT_REFERENCE}};
@@ -393,6 +395,9 @@ int main(){
     file_open_class(&reader,"./test_app.class");
 
     classloader_instance_t* loader = classloader_new();
+    classloader_load_class(loader,&reader);
+
+    file_open_class(&reader,"./private_fieldC.class");
     classloader_load_class(loader,&reader);
 
     classlinker_instance_t* linker = classlinker_new();

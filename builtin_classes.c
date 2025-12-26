@@ -21,6 +21,7 @@ static jvm_error_t string_native_utf8_init(jvm_frame_t* frame);
 static jvm_error_t outputstream_init(jvm_frame_t* frame);
 static jvm_error_t outputstream_wfd_init(jvm_frame_t* frame);
 static jvm_error_t printstream_init(jvm_frame_t* frame);
+static jvm_error_t object_init(jvm_frame_t* frame);
 
 static jvm_error_t ioexception_init(jvm_frame_t* frame);
 
@@ -41,13 +42,18 @@ static jvm_error_t printstream_println(jvm_frame_t* frame);
 static jvm_error_t printstream_printlnvoid(jvm_frame_t* frame);
 
 classlinker_normalclass_t java_lang_Object_info = {
-    .methods_count = 1,
+    .methods_count = 2,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
             .raw_description = "()V",
             .fn = object_clinit,
             .flags = ACC_STATIC,
+        },
+        {
+            .name = "<init>",
+            .raw_description = "()V",
+            .fn = object_init,
         },
     },
 };
@@ -384,12 +390,15 @@ static jvm_error_t string_clinit(jvm_frame_t* frame){
 static jvm_error_t object_clinit(jvm_frame_t* frame){
     return JVM_OK;
 }
+static jvm_error_t object_init(jvm_frame_t* frame){
+    return JVM_OK;
+}
 
 static jvm_error_t system_clinit(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
     
-    classlinker_field_t* field_out = classlinker_find_staticfield(frame->method->class,"out");
-    classlinker_field_t* field_err = classlinker_find_staticfield(frame->method->class,"err");
+    classlinker_field_t* field_out = classlinker_find_staticfield(frame,frame->method->class,"out");
+    classlinker_field_t* field_err = classlinker_find_staticfield(frame,frame->method->class,"err");
 
     FAIL_SET_JUMP(field_out,err,JVM_NOTFOUND,exit);
     FAIL_SET_JUMP(field_err,err,JVM_NOTFOUND,exit);
@@ -410,8 +419,8 @@ static jvm_error_t system_clinit(jvm_frame_t* frame){
     *(void**)field_out->value.value = out_stream;
     *(void**)field_err->value.value = out_stream;
 
-    classlinker_method_t* console_init = objectmanager_object_get_method(console_stream,"<init>", "(I)V");
-    classlinker_method_t* outerr_init = objectmanager_object_get_method(out_stream,"<init>", "(Ljava/io/OutputStream;)V");
+    classlinker_method_t* console_init = objectmanager_object_get_method(frame,console_stream,"<init>", "(I)V");
+    classlinker_method_t* outerr_init = objectmanager_object_get_method(frame,out_stream,"<init>", "(Ljava/io/OutputStream;)V");
  
     FAIL_SET_JUMP(console_init,err,JVM_NOTFOUND,exit);
     FAIL_SET_JUMP(outerr_init,err,JVM_NOTFOUND,exit);
@@ -461,7 +470,7 @@ static jvm_error_t outputstream_wfd_init(jvm_frame_t* frame){
     objectmanager_object_t* self = *(void**)frame->locals[0].value;
     int32_t fd = *(int32_t*)frame->locals[1].value;
 
-    classlinker_field_t* field_fd = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "fd");
+    classlinker_field_t* field_fd = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "fd");
     FAIL_SET_JUMP(field_fd,err,JVM_NOTFOUND,exit);
 
     field_fd->value.type = EJVT_INT;
@@ -475,7 +484,7 @@ static jvm_error_t outputstream_close(jvm_frame_t* frame){
 
     objectmanager_object_t* self = *(void**)frame->locals[0].value;
 
-    classlinker_field_t* field_fd = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "fd");
+    classlinker_field_t* field_fd = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "fd");
     FAIL_SET_JUMP(field_fd,err,JVM_NOTFOUND,exit);
 
     int32_t fd = *(int32_t*)field_fd->value.value;
@@ -491,7 +500,7 @@ static jvm_error_t outputstream_flush(jvm_frame_t* frame){
 
     objectmanager_object_t* self = *(void**)frame->locals[0].value;
 
-    classlinker_field_t* field_fd = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "fd");
+    classlinker_field_t* field_fd = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "fd");
     FAIL_SET_JUMP(field_fd,err,JVM_NOTFOUND,exit);
 
     int32_t fd = *(int32_t*)field_fd->value.value;
@@ -514,7 +523,7 @@ static jvm_error_t outputstream_writebytes(jvm_frame_t* frame){
 
     FAIL_SET_JUMP(bytes_array,err,JVM_UNKNOWN,exit);
 
-    classlinker_field_t* field_fd = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "fd");
+    classlinker_field_t* field_fd = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "fd");
     FAIL_SET_JUMP(field_fd,err,JVM_NOTFOUND,exit);
 
     int32_t fd = *(int32_t*)field_fd->value.value;
@@ -535,7 +544,7 @@ static jvm_error_t printstream_init(jvm_frame_t* frame){
     objectmanager_object_t* self = *(void**)frame->locals[0].value;
     objectmanager_object_t* stream = *(void**)frame->locals[1].value;
 
-    classlinker_field_t* output_stream = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "output_stream");
+    classlinker_field_t* output_stream = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "output_stream");
     *(void**)output_stream->value.value = stream;
     output_stream->value.type = EJVT_REFERENCE;
 
@@ -547,13 +556,13 @@ static jvm_error_t printstream_common(jvm_frame_t* frame, objectmanager_object_t
 
     objectmanager_object_t* self_object = *(void**)frame->locals[0].value;
 
-    classlinker_field_t* output_stream = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self_object), "output_stream");
+    classlinker_field_t* output_stream = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self_object), "output_stream");
     FAIL_SET_JUMP(output_stream,err,JVM_NOTFOUND,exit);
 
     objectmanager_object_t* output_stream_object = *(void**)output_stream->value.value;
     FAIL_SET_JUMP(output_stream,err,JVM_UNKNOWN,exit);
 
-    classlinker_method_t* write_method = objectmanager_object_get_method(output_stream_object,"write", "([B)V");
+    classlinker_method_t* write_method = objectmanager_object_get_method(frame,output_stream_object,"write", "([B)V");
     FAIL_SET_JUMP(write_method,err,JVM_NOTFOUND,exit);
 
     jvm_value_t args[2] = {{EJVT_REFERENCE},{EJVT_REFERENCE}};
@@ -713,7 +722,7 @@ static jvm_error_t printstream_printstring(jvm_frame_t* frame){
 
     objectmanager_object_t* string = *(void**)frame->locals[1].value;
 
-    objectmanager_object_t* byte_array_object = *(void**)objectmanager_class_object_get_field(objectmanager_get_class_object_info(string), "UTF8_string")->value.value;
+    objectmanager_object_t* byte_array_object = *(void**)objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(string), "UTF8_string")->value.value;
     FAIL_SET_JUMP(byte_array_object,err,JVM_OPCODE_INVALID,exit);
 
     err = printstream_common(frame,byte_array_object);
@@ -779,7 +788,7 @@ static jvm_error_t string_native_utf8_init(jvm_frame_t* frame){
         *(char*)array_itself->elements[i].value = native_utf8[i];
     }
 
-    classlinker_field_t* field = objectmanager_class_object_get_field(objectmanager_get_class_object_info(self), "UTF8_string");
+    classlinker_field_t* field = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "UTF8_string");
     FAIL_SET_JUMP(field,err,JVM_NOTFOUND,exit);
 
     field->value.type = EJVT_REFERENCE;

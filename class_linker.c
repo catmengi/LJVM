@@ -721,14 +721,19 @@ classlinker_class_t* classlinker_find_class(classlinker_instance_t* linker, char
     return NULL;
 }
 
-classlinker_method_t* classlinker_find_method(classlinker_class_t* class, char* name, char* description){
+classlinker_method_t* classlinker_find_method(jvm_frame_t* frame, classlinker_class_t* class, char* name, char* description){
     for(classlinker_class_t* cur = class; cur ;cur = cur->parent){
         if(cur->type == EClass){
             classlinker_normalclass_t* class_info = cur->info;
             for(unsigned i = 0; i < class_info->methods_count; i++){
                 if(strcmp(name,class_info->methods[i].name) == 0){
                     if(description == NULL || strcmp(description,class_info->methods[i].raw_description) == 0){
-                        return &class_info->methods[i];
+
+                        if((class_info->methods[i].flags & ACC_PRIVATE) == ACC_PRIVATE){
+                            if(frame && frame->method && cur == frame->method->class)
+                                return &class_info->methods[i];
+                            else continue;
+                        } else return &class_info->methods[i];;
                     }
                 }
             }
@@ -737,31 +742,21 @@ classlinker_method_t* classlinker_find_method(classlinker_class_t* class, char* 
     return NULL;
 }
 
-classlinker_class_t* classlinker_find_method_class(classlinker_class_t* class, char* name, char* description){
-    for(classlinker_class_t* cur = class; cur ;cur = cur->parent){
-        if(cur->type == EClass){
-            classlinker_normalclass_t* class_info = cur->info;
-            for(unsigned i = 0; i < class_info->methods_count; i++){
-                if(strcmp(name,class_info->methods[i].name) == 0){
-                    if(description == NULL || strcmp(description,class_info->methods[i].raw_description) == 0){
-                        return cur;
-                    }
-                }
-            }
-        }
-    }
-    return NULL;
-}
-
-classlinker_field_t* classlinker_find_staticfield(classlinker_class_t* class, char* field_name){
+classlinker_field_t* classlinker_find_staticfield(jvm_frame_t* frame, classlinker_class_t* class, char* field_name){
     if(class != NULL){
+        for(classlinker_class_t* cur = class; cur; cur = cur->parent){
         classlinker_normalclass_t* class_info = class->info;
-        for(unsigned i = 0; i < class_info->static_fields_count; i++){
-            if(strcmp(field_name, class_info->static_fields[i].name) == 0){
-                return &class_info->static_fields[i];
+            for(unsigned i = 0; i < class_info->static_fields_count; i++){
+                if(strcmp(field_name, class_info->static_fields[i].name) == 0){
+
+                    if((class_info->static_fields[i].flags & ACC_PRIVATE) == ACC_PRIVATE){
+                        if(frame && frame->method && cur == frame->method->class)
+                            return &class_info->static_fields[i];
+                        else continue;
+                    } else return &class_info->static_fields[i];
+                }
             }
         }
-        return classlinker_find_staticfield(class->parent, field_name);
     }
     return NULL;
 }

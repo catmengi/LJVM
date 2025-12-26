@@ -1,5 +1,6 @@
 #include "object.h"
 #include "class_linker.h"
+#include "class_loader.h"
 #include "jvm.h"
 
 jvm_error_t objectmanager_init_heap(jvm_frame_t* frame, uint32_t heap_size){
@@ -84,26 +85,31 @@ objectmanager_array_object_t* objectmanager_get_array_object_info(objectmanager_
     return ret;
 }
 
-classlinker_field_t* objectmanager_class_object_get_field(objectmanager_class_object_t* class_object,
+classlinker_field_t* objectmanager_class_object_get_field(jvm_frame_t* frame, objectmanager_class_object_t* class_object,
                                                           char* name){
     classlinker_field_t* found = NULL;
     for(classlinker_class_t* cur = class_object->class; cur; cur = cur->parent){
         classlinker_normalclass_t* class_info = cur->info;
-        for(unsigned i = 0; i < class_info->fields_count; i++){
+        for(unsigned i = 0; i < class_info->fields_count; i++){            
             if(strcmp(class_object->fields[cur->generation][i].name, name) == 0){
-                return &class_object->fields[cur->generation][i];
+
+                if((class_object->fields[cur->generation][i].flags & ACC_PRIVATE) == ACC_PRIVATE){
+                    if(cur == frame->method->class)
+                        return &class_object->fields[cur->generation][i];
+                    else continue;
+                } else return &class_object->fields[cur->generation][i];
             }
         }
     }
     return NULL;
 }
 
-classlinker_method_t* objectmanager_object_get_method(objectmanager_object_t* object,
+classlinker_method_t* objectmanager_object_get_method(jvm_frame_t* frame, objectmanager_object_t* object,
                                                             char* name, char* description){
 
     classlinker_class_t* where_to_look = object->type == EJOMOT_CLASS ? ((objectmanager_class_object_t*)object->data)->class : classlinker_find_class(object->jvm->linker,"java/lang/Object");
     
-    return classlinker_find_method(where_to_look,name,description);
+    return classlinker_find_method(frame, where_to_look,name,description);
 }
 
 bool objectmanager_class_object_is_compatible_to(objectmanager_class_object_t* class_object, classlinker_class_t* class){

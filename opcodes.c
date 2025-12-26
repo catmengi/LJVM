@@ -61,7 +61,7 @@ jvm_error_t jvm_ldc_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_
                 objectmanager_object_t* string = objectmanager_new_class_object(frame,classlinker_find_class(frame->jvm->linker,"java/lang/String"));
                 FAIL_SET_JUMP(string,err,JVM_OOM,exit);
 
-                classlinker_method_t* init_method = objectmanager_object_get_method(string,"<init>","(*)V");
+                classlinker_method_t* init_method = objectmanager_object_get_method(frame,string,"<init>","(*)V");
                 FAIL_SET_JUMP(init_method,err,JVM_NOTFOUND,exit);
 
                 jvm_value_t args[2] = {{EJVT_REFERENCE},{EJVT_NATIVEPTR}};
@@ -98,7 +98,7 @@ jvm_error_t jvm_putstatic_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classl
     classlinker_fmimref_t* field_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
 
 
-    classlinker_field_t* field = classlinker_find_staticfield(field_ref->class, field_ref->nameandtype.name);
+    classlinker_field_t* field = classlinker_find_staticfield(frame,field_ref->class, field_ref->nameandtype.name);
     FAIL_SET_JUMP(field,err,JVM_NOTFOUND,exit);
     FAIL_SET_JUMP((field->flags & ACC_STATIC) == ACC_STATIC,err,JVM_OPCODE_INVALID,exit);
 
@@ -116,7 +116,7 @@ jvm_error_t jvm_getstatic_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classl
     classlinker_fmimref_t* field_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
 
 
-    classlinker_field_t* field = classlinker_find_staticfield(field_ref->class, field_ref->nameandtype.name);
+    classlinker_field_t* field = classlinker_find_staticfield(frame,field_ref->class, field_ref->nameandtype.name);
     FAIL_SET_JUMP(field,err,JVM_NOTFOUND,exit);
     FAIL_SET_JUMP((field->flags & ACC_STATIC) == ACC_STATIC,err,JVM_OPCODE_INVALID,exit);
 
@@ -304,7 +304,7 @@ jvm_error_t jvm_invokestatic_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cla
     classlinker_normalclass_t* class_info = cur_class->info;
     classlinker_fmimref_t* method_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
 
-    classlinker_method_t* method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
+    classlinker_method_t* method = classlinker_find_method(frame,method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
 
     jvm_value_t* method_args = alloca(method->frame_descriptor.arguments_count * sizeof(*method_args));
     for(unsigned i = method->frame_descriptor.arguments_count; i-- > 0;){
@@ -685,7 +685,7 @@ jvm_error_t jvm_invokevirtual_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cl
     classlinker_normalclass_t* class_info = cur_class->info;
 
     classlinker_fmimref_t* method_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
-    classlinker_method_t* class_method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
+    classlinker_method_t* class_method = classlinker_find_method(frame,method_ref->class,method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
     FAIL_SET_JUMP(class_method,err,JVM_NOTFOUND,exit);
 
     jvm_value_t* method_args = alloca((class_method->frame_descriptor.arguments_count + 1) * sizeof(*method_args));
@@ -702,7 +702,7 @@ jvm_error_t jvm_invokevirtual_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cl
 
     FAIL_SET_JUMP(objectmanager_class_object_is_compatible_to(class_object,method_ref->class),err,JVM_OPPARAM_INVALID,exit);
 
-    classlinker_method_t* lookedup_method = objectmanager_object_get_method(object_itself, method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
+    classlinker_method_t* lookedup_method = objectmanager_object_get_method(frame,object_itself, method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
     FAIL_SET_JUMP(lookedup_method,err,JVM_NOTFOUND,exit);
 
     FAIL_SET_JUMP(strcmp(lookedup_method->name,"<init>") != 0 && strcmp(lookedup_method->name,"<clinit>") != 0, err,JVM_OPPARAM_INVALID,exit);
@@ -720,7 +720,7 @@ jvm_error_t jvm_invokespecial_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cl
     classlinker_normalclass_t* class_info = cur_class->info;
 
     classlinker_fmimref_t* method_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
-    classlinker_method_t* class_method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
+    classlinker_method_t* class_method = classlinker_find_method(frame,method_ref->class,method_ref->nameandtype.name, method_ref->nameandtype.descriptor);
     FAIL_SET_JUMP(class_method,err,JVM_NOTFOUND,exit);
 
     jvm_value_t* method_args = alloca((class_method->frame_descriptor.arguments_count + 1) * sizeof(*method_args));
@@ -731,13 +731,55 @@ jvm_error_t jvm_invokespecial_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cl
     jvm_value_t object = frame->stack.stack[--frame->stack.sp];
     method_args[0] = object;
 
-    classlinker_method_t* lookedup_method = classlinker_find_method(method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
+    classlinker_method_t* lookedup_method = classlinker_find_method(frame,method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
     FAIL_SET_JUMP(lookedup_method,err,JVM_NOTFOUND,exit);
-
-    FAIL_SET_JUMP(strcmp(lookedup_method->name,"<init>") == 0 || strcmp(lookedup_method->name,"<clinit>") == 0, err,JVM_OPPARAM_INVALID,exit);
 
     jvm_error_t invoke_err = jvm_invoke(frame->jvm,frame,lookedup_method,class_method->frame_descriptor.arguments_count + 1,method_args);
     FAIL_SET_JUMP(invoke_err == JVM_OK,err,invoke_err,exit);
+
+exit:
+    return err;
+}
+
+jvm_error_t jvm_getfield_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_class_t* cur_class, unsigned nargs, void* args[]){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* object = *(void**)frame->stack.stack[--frame->stack.sp].value;
+    objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(object);
+
+    FAIL_SET_JUMP(cobject,err,JVM_OPPARAM_INVALID,exit);
+
+    classlinker_normalclass_t* class_info = cur_class->info;
+    classlinker_fmimref_t* field_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
+
+    FAIL_SET_JUMP(field_ref,err,JVM_NOTFOUND,exit);
+
+    classlinker_field_t* field = objectmanager_class_object_get_field(frame,cobject, field_ref->nameandtype.name);
+    FAIL_SET_JUMP(field,err,JVM_NOTFOUND,exit);
+
+    frame->stack.stack[frame->stack.sp++] = field->value;
+
+exit:
+    return err;
+}
+jvm_error_t jvm_putfield_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classlinker_class_t* cur_class, unsigned nargs, void* args[]){
+    jvm_error_t err = JVM_OK;
+
+    jvm_value_t value = frame->stack.stack[--frame->stack.sp];
+    objectmanager_object_t* object = *(void**)frame->stack.stack[--frame->stack.sp].value;
+    objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(object);
+
+    FAIL_SET_JUMP(cobject,err,JVM_OPPARAM_INVALID,exit);
+
+    classlinker_normalclass_t* class_info = cur_class->info;
+    classlinker_fmimref_t* field_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
+
+    FAIL_SET_JUMP(field_ref,err,JVM_NOTFOUND,exit);
+
+    classlinker_field_t* field = objectmanager_class_object_get_field(frame,cobject, field_ref->nameandtype.name);
+    FAIL_SET_JUMP(field,err,JVM_NOTFOUND,exit);
+
+    field->value = value;
 
 exit:
     return err;
