@@ -192,5 +192,6 @@ typedef struct{ //probably will be not implemented
 }classloader_constant_invokedynamic_t;
 
 classloader_instance_t* classloader_new();
+void classloader_destroy(classloader_instance_t* instance);
 classloader_error_t classloader_load_class(classloader_instance_t* instance, file_reader_t* reader);
-int classloader_load_jar(classloader_instance_t* instance, const char* jar);
+classloader_error_t classloader_load_folder(classloader_instance_t* instance, const char* path);

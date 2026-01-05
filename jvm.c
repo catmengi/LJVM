@@ -380,6 +380,7 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
         frame.locals[i] = args[i];
     }
 
+    //Call section!
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
         if((callable_method->flags & ACC_STATIC) == ACC_STATIC){
             classlinker_class_lock(callable_method->class);
@@ -390,6 +391,16 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
 
     jvm_error_t method_err = callable_method->fn(&frame);
     FAIL_SET_JUMP(method_err == JVM_OK,err,method_err,exit);
+
+
+    if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
+        if((callable_method->flags & ACC_STATIC) == ACC_STATIC){
+            classlinker_class_unlock(callable_method->class);
+        } else {
+            objectmanager_object_unlock(*(void**)frame.locals[0].value);
+        }
+    }
+    //===============
 
     if(jvm_current_thread){
         jvm_current_thread->topmost_frame = previous_frame;
@@ -452,6 +463,9 @@ jvm_error_t jvm_throw(jvm_frame_t* frame, objectmanager_object_t* exception_obje
     }
 
 exit:
+    if(err == JVM_UNKNOWN){
+        printf("unhandled exception! %s\n",exception_cobject->class->this_name);
+    }
     jvm_unlock(frame->jvm);
     return err;
 }
@@ -531,53 +545,12 @@ exit:{
         jvm_thread_t* tmp_thread = jvm_current_thread;
         jvm_current_thread = NULL;
 
+        //TODO: kill other threads properly!
+
         if(tmp_thread){
             list_del(&tmp_thread->list);
             arena_free_block(tmp_thread);
         }
     }
     return err;
-}
-
-jvm_error_t debug_segfault(jvm_frame_t* frame){
-    objectmanager_object_t* string_array = *(void**)frame->locals[0].value;
-    objectmanager_array_object_t* array_itself = objectmanager_get_array_object_info(string_array);
-
-    *(int*)1 = 0;
-
-    return JVM_OK;
-}
-
-int main(){
-    file_reader_t reader = {0};
-    file_open_class(&reader,"./test_app.class");
-
-    classloader_instance_t* loader = classloader_new();
-    classloader_load_class(loader,&reader);
-
-    file_open_class(&reader,"./private_fieldC.class");
-    classloader_load_class(loader,&reader);
-
-    classlinker_instance_t* linker = classlinker_new();
-
-    classlinker_method_t debug_segfault_m = {
-        .name = "debug_segfault",
-        .fn = debug_segfault,
-        .raw_description = "([Ljava/lang/String;)V",
-        .flags = ACC_STATIC,
-        .frame_descriptor.arguments_count = 1,
-    };
-
-    classlinker_jni_t jnis[] = {{.class_name = "test_app", .method = &debug_segfault_m}};
-    classlinker_jni_list_t jni_list = {.fn_count = 1, .fns = jnis};
-
-    linker->jni_list = &jni_list;
-
-    classlinker_link(linker,loader);
-
-    jvm_instance_t* jvm = jvm_new(linker, 2 * 1024 * 1024);
-
-    jvm_launch_class(jvm,"test_app",1,(char*[]){"Hello world!\n"});
-
-    return 0;
 }

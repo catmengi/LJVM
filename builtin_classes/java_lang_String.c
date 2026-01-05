@@ -19,6 +19,22 @@ exit:
     return err;
 }
 
+static jvm_error_t string_init_chars(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],objectmanager_object_t*);
+    classlinker_field_t* self_internals = objectmanager_class_object_get_field(frame,objectmanager_get_class_object_info(self), "UTF8_string");
+
+    C_TO_JVM_VALUE(self_internals->value,objectmanager_object_clone(frame, JVM_TO_C_VALUE(frame->locals[1],objectmanager_object_t*)));
+    FAIL_SET_JUMP(JVM_TO_C_VALUE(self_internals->value, objectmanager_object_t*),err,JVM_OOM,exit);
+exit:
+    return err;
+}
+
+static jvm_error_t string_init_chars_offlen(jvm_frame_t* frame){
+    return JVM_OK;
+}
+
 static jvm_error_t string_string_init(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
 
@@ -70,7 +86,7 @@ static jvm_error_t string_getBytes(jvm_frame_t* frame){
 }
 
 classlinker_normalclass_t java_lang_String_info = {
-    .methods_count = 5,
+    .methods_count = 7,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -97,6 +113,20 @@ classlinker_normalclass_t java_lang_String_info = {
             .fn = string_string_init,
             .frame_descriptor.arguments_count = 1,
             .flags = ACC_NATIVE,                
+        },
+        {
+            .name = "<init>",
+            .raw_description = "([C)V",
+            .fn = string_init_chars,
+            .frame_descriptor.arguments_count = 1,
+            .flags = ACC_NATIVE,
+        },
+        {
+            .name = "<init>",
+            .raw_description = "([CII)V",
+            .fn = string_init_chars_offlen,
+            .frame_descriptor.arguments_count = 3,
+            .flags = ACC_NATIVE,
         },
         {
             .name = "getBytes",

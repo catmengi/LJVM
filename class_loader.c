@@ -3,6 +3,9 @@
 #include "class_loader.h"
 #include "reader.h"
 
+#include <dirent.h>
+#include <sys/stat.h>
+
 #define CLASSLOADER_ARENA_SIZE 1024 * 1024
 
 void* parse_utf8(classloader_instance_t* instance, file_reader_t* reader){
@@ -238,8 +241,52 @@ classloader_instance_t* classloader_new(){
     return instance;
 }
 
-int classloader_load_jar(classloader_instance_t* instance, const char* jar){
-    return -1;
+classloader_error_t classloader_load_folder(classloader_instance_t* instance, const char* path){
+    classloader_error_t err = CLASSLOADER_OK;
+
+    DIR* dir_fd = NULL;
+    struct dirent* in_file = NULL;
+
+    dir_fd = opendir(path);
+    FAIL_SET_JUMP(dir_fd, err, CLASSLOADER_FILE_ERROR, exit);
+
+    while ((in_file = readdir(dir_fd))) {
+        if (strstr(in_file->d_name, ".class") && in_file->d_name[strlen(in_file->d_name) - 6] == '.' &&
+            in_file->d_name[strlen(in_file->d_name) - 5] == 'c' &&
+            in_file->d_name[strlen(in_file->d_name) - 4] == 'l' &&
+            in_file->d_name[strlen(in_file->d_name) - 3] == 'a' &&
+            in_file->d_name[strlen(in_file->d_name) - 2] == 's' &&
+            in_file->d_name[strlen(in_file->d_name) - 1] == 's') {  // More precise .class check
+
+            size_t path_len = strlen(path);
+            size_t name_len = strlen(in_file->d_name);
+            char* full_path = arena_calloc(instance->loader_arena, 1, path_len + 1 + name_len + 1);
+            FAIL_SET_JUMP(full_path, err, CLASSLOADER_OOM, exit);
+            strcpy(full_path, path);
+            strcat(full_path, "/");
+            strcat(full_path, in_file->d_name);
+
+            struct stat st;
+            if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode)) {
+                file_reader_t reader;
+                int open_ret = file_open_class(&reader, full_path);
+                FAIL_SET_JUMP(open_ret == 0, err, CLASSLOADER_FILE_ERROR, exit);
+
+                classloader_error_t load_err = classloader_load_class(instance, &reader);
+                if (load_err != CLASSLOADER_OK) {
+                    err = load_err; 
+                }
+
+                file_close_class(&reader);
+            }
+        }
+    }
+
+exit:
+    if (dir_fd) {
+        closedir(dir_fd);
+    }
+    return err;
 }
 
 classloader_error_t classloader_load_class(classloader_instance_t* instance, file_reader_t* reader){
@@ -338,5 +385,5 @@ exit:
 }
 
 void classloader_destroy(classloader_instance_t* instance){
-    arena_free(instance->loader_arena);
+    TODO("find why arena_free doesnt work!");
 }

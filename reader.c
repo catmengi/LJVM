@@ -37,6 +37,9 @@ static int class_read_bytes(void* userctx, void* output, unsigned size){
 static bool class_seek(void* userctx, int n){
     return !fseek(userctx,n,SEEK_CUR);
 }
+static void class_close(void* userctx){
+    fclose(userctx);
+}
 
 int file_open_class(file_reader_t* reader, const char* path){
     if(reader && path){
@@ -45,11 +48,18 @@ int file_open_class(file_reader_t* reader, const char* path){
             reader->read_int = class_read_int;
             reader->read_bytes = class_read_bytes;
             reader->seek = class_seek;
+            reader->close = class_close;
 
             return 0;
         }
     }
     return 1;
+}
+
+void file_close_class(file_reader_t* reader){
+    if(reader){
+        reader->close(reader->userctx);
+    }
 }
 
 int file_read_int(file_reader_t* reader, void* output_int, char int_size){

@@ -74,6 +74,8 @@ typedef struct jvm_instance_t{
     struct list_head threads;
 }jvm_instance_t;
 
+jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size); //Creates new jvm
+jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, char** args); //Launches specified class
 
 //NOTE ABOUT LJNI: Allocations done by native function and doesnt stored in classes, objects, frame locals, frame stack are invisible to GC, and it will treat them as unused!
 //So if you need to allocate something from native function, please store it to local variable immeadiatly after you allocate. like this: C_TO_JVM_VALUE(frame->locals[N],objectmanager_new_*_object)!!!!
@@ -111,5 +113,6 @@ jvm_value_t jvm_native_get_return(jvm_frame_t* frame); //Gets function return va
 
 
 #define C_TO_JVM_VALUE(jvm_value,C_value) {(jvm_value).type = C_TO_JVM_TYPE((C_value)); *(typeof(C_value)*)(jvm_value).value = (C_value);} //Macro to convert C to jvm_value_t
+#define C_TO_NEW_JVM_VALUE(C_value) ({jvm_value_t new_value = {0}; C_TO_JVM_VALUE(new_value,C_value); (new_value);})
 #define JVM_TO_C_VALUE(jvm_value,type) *(type*)(jvm_value).value //Macro to convert jvm_value_t to native value, require type. For example to get EJVT_INT you pass uint32_t,
                                                                  //For EJVT_REFERENCE: objectmanager_object_t* and likewise for other types

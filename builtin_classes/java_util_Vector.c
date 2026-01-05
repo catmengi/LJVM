@@ -501,6 +501,7 @@ static jvm_error_t vector_lastIndexOf(jvm_frame_t* frame){
     return JVM_OK;
 }
 
+// Made by me
 extern classlinker_class_t java_util_Enumeration;
 
 static jvm_error_t VENUMER_hasMoreElements(jvm_frame_t* frame){
@@ -519,7 +520,6 @@ static jvm_error_t VENUMER_hasMoreElements(jvm_frame_t* frame){
     return JVM_OK;
 }
 
-// Made by me
 static jvm_error_t VENUMER_nextElement(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
 
