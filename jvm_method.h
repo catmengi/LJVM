@@ -2,6 +2,7 @@
 
 typedef struct jvm_frame_t jvm_frame_t;
 typedef enum{
+    JVM_SYSTEM_EXIT = -2,
     JVM_UNKNOWN = -1,
     JVM_OK = 0,
     JVM_OOM,
@@ -9,7 +10,7 @@ typedef enum{
     JVM_OPCODE_INVALID,
     JVM_OPPARAM_INVALID,
     JVM_METHOD_RETURN,
-    JVM_ARRAY_OUTOFBOUNDS,
+    JVM_ARRAY_OUTOFBOUNDS
 }jvm_error_t;
 
 typedef jvm_error_t (*jvm_method_t)(jvm_frame_t* frame);
