@@ -20,7 +20,8 @@ extern classlinker_class_t java_util_Vector;
 extern classlinker_class_t java_util_NoSuchElementException;
 extern classlinker_class_t java_util_Enumeration;
 extern classlinker_class_t vector_enumerator;
-
+extern classlinker_class_t java_lang_IndexOutOfBoundsException;
+extern classlinker_class_t java_lang_StringIndexOutOfBoundsException;
 
 classlinker_class_t* builtin_classes[] = {
     &java_lang_Object,
@@ -32,6 +33,8 @@ classlinker_class_t* builtin_classes[] = {
     &java_lang_NullPointerException,
     &java_lang_ArrayIndexOutOfBoundsException,
     &java_lang_NegativeArraySizeException,
+    &java_lang_IndexOutOfBoundsException,
+    &java_lang_StringIndexOutOfBoundsException, 
     &vector_enumerator,
     &java_util_Vector,
     &java_util_Enumeration,

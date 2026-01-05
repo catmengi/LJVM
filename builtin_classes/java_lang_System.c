@@ -3,18 +3,12 @@
 #include "../object.h"
 #include "../class_linker.h"
 
-
-/*
-C_TO_JVM_VALUE
-*/
-
-
-
 extern classlinker_class_t java_lang_Object;
 
 
 static jvm_error_t system_gc(jvm_frame_t* frame);
 static jvm_error_t system_exit(jvm_frame_t* frame);
+static jvm_error_t system_arraycopy(jvm_frame_t* frame);
 static jvm_error_t system_clinit(jvm_frame_t* frame);
 
 
@@ -31,7 +25,7 @@ classlinker_normalclass_t java_lang_System_info = {
         }
     },
 
-    .methods_count = 3,
+    .methods_count = 4,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -54,6 +48,13 @@ classlinker_normalclass_t java_lang_System_info = {
             .flags = ACC_STATIC | ACC_NATIVE,
 
         },
+        {
+            .name = "arraycopy",
+            .raw_description = "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+            .frame_descriptor.arguments_count = 5,
+            .fn = system_arraycopy,
+            .flags = ACC_STATIC | ACC_NATIVE,
+        }
     }
 };
 
@@ -69,6 +70,54 @@ classlinker_class_t java_lang_System = {
 static jvm_error_t system_gc(jvm_frame_t* frame) {
     objectmanager_gc(frame->jvm, 0);
     return JVM_OK;
+}
+
+static jvm_error_t system_arraycopy(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+    bool do_throw = false;
+    char* throw_what = NULL;
+
+    objectmanager_object_t* array_obj_src = JVM_TO_C_VALUE(frame->locals[0],objectmanager_object_t*);
+    uint32_t src_offset = JVM_TO_C_VALUE(frame->locals[1],uint32_t);
+
+    objectmanager_object_t* array_obj_dst = JVM_TO_C_VALUE(frame->locals[2],objectmanager_object_t*);
+    uint32_t dst_offset = JVM_TO_C_VALUE(frame->locals[3],uint32_t);
+    uint32_t length = JVM_TO_C_VALUE(frame->locals[4],uint32_t);
+
+
+    FAIL_SET_JUMP(array_obj_src && array_obj_dst, do_throw,({throw_what = "java/lang/NullPointerException";(true);}),exit);
+
+    objectmanager_array_object_t* array_src = objectmanager_get_array_object_info(array_obj_src);
+    objectmanager_array_object_t* array_dst = objectmanager_get_array_object_info(array_obj_dst);
+
+    FAIL_SET_JUMP(array_src && array_dst, do_throw,({throw_what = "java/lang/ArrayStoreException";(true);}),exit);
+    FAIL_SET_JUMP(array_src->count - src_offset > length,do_throw,({throw_what = "java/lang/IndexOutOfBoundsException";(true);}),exit);
+    FAIL_SET_JUMP(array_dst->count - dst_offset > length,do_throw,({throw_what = "java/lang/IndexOutOfBoundsException";(true);}),exit);
+
+    for(unsigned i = 0; i < length; i++){
+        array_dst->elements[i + dst_offset] = array_src->elements[i + src_offset];
+    }
+
+exit:
+    if(do_throw){
+        jvm_lock(frame->jvm);
+        objectmanager_object_t* exception = objectmanager_new_class_object(frame, classlinker_find_class(frame->jvm->linker, throw_what));
+        objectmanager_class_object_t* ecobject = objectmanager_get_class_object_info(exception);
+        if(!exception){
+            err = JVM_OOM;
+            jvm_unlock(frame->jvm);
+        } else {
+            jvm_value_t init_args[1] = {0};
+            C_TO_JVM_VALUE(init_args[0], exception);
+            err = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
+            if(err == JVM_OK){
+                err = jvm_throw(frame, exception);
+            }
+            jvm_unlock(frame->jvm);
+        }
+    }
+
+    return err;
 }
 
 //просто ломаем программу ошибочным ретурном

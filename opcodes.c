@@ -417,6 +417,7 @@ jvm_error_t jvm_invokestatic_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, cla
     classlinker_fmimref_t* method_ref = class_info->constant_pool.constants[(*(uint16_t*)args[0]) - 1].constant_value;
 
     classlinker_method_t* method = classlinker_find_method(frame,method_ref->class,method_ref->nameandtype.name,method_ref->nameandtype.descriptor);
+    FAIL_SET_JUMP(method,err,JVM_NOTFOUND,exit);
 
     jvm_value_t* method_args = alloca(method->frame_descriptor.arguments_count * sizeof(*method_args));
     for(unsigned i = method->frame_descriptor.arguments_count; i-- > 0;){
@@ -1250,9 +1251,9 @@ jvm_error_t jvm_anewarray_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classl
 
             errs = jvm_invoke(frame->jvm,frame,objectmanager_class_object_get_method(frame,ecobject,"<init>", "()V"),1,init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame,exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }),exit);
@@ -1302,9 +1303,9 @@ jvm_error_t jvm_arrayload_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classl
 
             errs = jvm_invoke(frame->jvm,frame,objectmanager_class_object_get_method(frame,ecobject,"<init>", "()V"),1,init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame,exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }),exit);
@@ -1340,9 +1341,9 @@ jvm_error_t jvm_arraystore_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, class
 
             errs = jvm_invoke(frame->jvm,frame,objectmanager_class_object_get_method(frame,ecobject,"<init>", "()V"),1,init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame,exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }),exit);
@@ -1487,9 +1488,9 @@ jvm_error_t jvm_checkcast_opcode(jvm_opcode_t opcode, jvm_frame_t* frame, classl
 
             errs = jvm_invoke(frame->jvm,frame,objectmanager_class_object_get_method(frame,ecobject,"<init>", "()V"),1,init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame,exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }),exit);

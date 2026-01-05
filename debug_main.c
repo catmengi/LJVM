@@ -33,6 +33,6 @@ int main(){
 
     jvm_instance_t* jvm = jvm_new(linker, 2 * 1024 * 1024);
 
-    printf("%d\n",jvm_launch_class(jvm,"test_app",1,(char*[]){"Hello world!\n"}));
+    printf("jvm exit code: %d\n",jvm_launch_class(jvm,"test_app",1,(char*[]){"Hello world!\n"}));
     return 0;
 }

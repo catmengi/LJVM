@@ -4,7 +4,7 @@
 #include "arena.h"
 #include "list.h"
 
-//#define __FSJ_DO_CRASH__
+#define __FSJ_DO_CRASH__
 
 #ifdef __FSJ_DO_CRASH__
 #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); printf("%s:%d ERROR HAPPENED, CODE: %x\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); *(int*)1 = 0;goto label;}}

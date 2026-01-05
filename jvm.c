@@ -10,6 +10,7 @@
 #include "object.h"
 #include "opcodes.h"
 
+#include <assert.h>
 #include <complex.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -103,17 +104,17 @@ static jvm_opcode_executor_t opcode_executors[211] = {
     [OP_FLOAD2] = {0,NULL,jvm_fload_opcodes},
     [OP_FLOAD3] = {0,NULL,jvm_fload_opcodes},
 
-    [OP_DLOAD] = {1,(jvm_opcode_argtype_t[]){EJOT_U8},jvm_fload_opcodes},
-    [OP_DLOAD0] = {0,NULL,jvm_fload_opcodes},
-    [OP_DLOAD1] = {0,NULL,jvm_fload_opcodes},
-    [OP_DLOAD2] = {0,NULL,jvm_fload_opcodes},
-    [OP_DLOAD3] = {0,NULL,jvm_fload_opcodes},
+    [OP_DLOAD] = {1,(jvm_opcode_argtype_t[]){EJOT_U8},jvm_dload_opcodes},
+    [OP_DLOAD0] = {0,NULL,jvm_dload_opcodes},
+    [OP_DLOAD1] = {0,NULL,jvm_dload_opcodes},
+    [OP_DLOAD2] = {0,NULL,jvm_dload_opcodes},
+    [OP_DLOAD3] = {0,NULL,jvm_dload_opcodes},
 
-    [OP_LLOAD] = {1,(jvm_opcode_argtype_t[]){EJOT_U8},jvm_fload_opcodes},
-    [OP_LLOAD0] = {0,NULL,jvm_fload_opcodes},
-    [OP_LLOAD1] = {0,NULL,jvm_fload_opcodes},
-    [OP_LLOAD2] = {0,NULL,jvm_fload_opcodes},
-    [OP_LLOAD3] = {0,NULL,jvm_fload_opcodes},
+    [OP_LLOAD] = {1,(jvm_opcode_argtype_t[]){EJOT_U8},jvm_lload_opcodes},
+    [OP_LLOAD0] = {0,NULL,jvm_lload_opcodes},
+    [OP_LLOAD1] = {0,NULL,jvm_lload_opcodes},
+    [OP_LLOAD2] = {0,NULL,jvm_lload_opcodes},
+    [OP_LLOAD3] = {0,NULL,jvm_lload_opcodes},
 
     [OP_ALOAD] = {1,(jvm_opcode_argtype_t[]){EJOT_U8},jvm_aload_opcodes},
     [OP_ALOAD0] = {0,NULL,jvm_aload_opcodes},
@@ -272,6 +273,18 @@ jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
 
     assert(objectmanager_init_heap(instance,heap_size) == JVM_OK);
 
+    jvm_thread_t* main_thread = arena_alloc(instance->arena,sizeof(*main_thread));
+    assert(main_thread);
+
+    INIT_LIST_HEAD(&instance->threads);
+    INIT_LIST_HEAD(&main_thread->list);
+    main_thread->JThread = NULL; //main isnt java thread fully;
+    main_thread->topmost_frame = NULL; //currently no frame
+
+    jvm_current_thread = main_thread;
+
+    list_add(&main_thread->list,&instance->threads);
+
     classlinker_class_t* class = NULL;
     list_for_each_entry(class,&linker->loaded_classes,list){
         {
@@ -369,9 +382,7 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
     memset(frame.locals,0,callable_method->frame_descriptor.locals_count * sizeof(*frame.locals));
     memset(frame.stack.stack,0,callable_method->frame_descriptor.stack_size * sizeof(*frame.stack.stack));
 
-    if(jvm_current_thread){
-        jvm_current_thread->topmost_frame = &frame;
-    }
+    jvm_current_thread->topmost_frame = &frame;
 
     FAIL_SET_JUMP(nargs <= frame.method->frame_descriptor.locals_count || nargs == 0,err,JVM_OPCODE_INVALID,exit);
     FAIL_SET_JUMP(callable_method->fn,err,JVM_NOTFOUND,exit);
@@ -380,31 +391,23 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
         frame.locals[i] = args[i];
     }
 
-    //Call section!
+    //Object/class lock section
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
-        if((callable_method->flags & ACC_STATIC) == ACC_STATIC){
-            classlinker_class_lock(callable_method->class);
-        } else {
-            objectmanager_object_lock(*(void**)frame.locals[0].value);
-        }
+        (callable_method->flags & ACC_STATIC) == ACC_STATIC ? 
+                    classlinker_class_unlock(callable_method->class) : objectmanager_object_unlock(*(void**)frame.locals[0].value);
     }
 
     jvm_error_t method_err = callable_method->fn(&frame);
-    FAIL_SET_JUMP(method_err == JVM_OK,err,method_err,exit);
-
 
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
-        if((callable_method->flags & ACC_STATIC) == ACC_STATIC){
-            classlinker_class_unlock(callable_method->class);
-        } else {
-            objectmanager_object_unlock(*(void**)frame.locals[0].value);
-        }
+        (callable_method->flags & ACC_STATIC) == ACC_STATIC ? 
+                    classlinker_class_unlock(callable_method->class) : objectmanager_object_unlock(*(void**)frame.locals[0].value);
     }
+
+    FAIL_SET_JUMP(method_err == JVM_OK,err,method_err,exit);
     //===============
 
-    if(jvm_current_thread){
-        jvm_current_thread->topmost_frame = previous_frame;
-    }
+    jvm_current_thread->topmost_frame =jvm_current_thread->topmost_frame->previous_frame;
 
 exit:
     return err;
@@ -527,30 +530,12 @@ jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, c
         *(void**)args_array->elements[i].value = string_arg;
     }
 
-    jvm_thread_t* new_thread = arena_calloc(instance->arena,1,sizeof(*new_thread));
-
-    INIT_LIST_HEAD(&new_thread->list);
-    list_add(&instance->threads,&new_thread->list);
-    new_thread->topmost_frame = &frame;
-
-    jvm_current_thread = new_thread;
-
     jvm_value_t invoke_args[] = {{EJVT_REFERENCE}};
     *(void**)invoke_args[0].value = args_object;
 
     jvm_error_t main_err = jvm_invoke(instance,NULL,method,1,invoke_args);
     FAIL_SET_JUMP(main_err == JVM_OK,err,main_err,exit);
 
-exit:{
-        jvm_thread_t* tmp_thread = jvm_current_thread;
-        jvm_current_thread = NULL;
-
-        //TODO: kill other threads properly!
-
-        if(tmp_thread){
-            list_del(&tmp_thread->list);
-            arena_free_block(tmp_thread);
-        }
-    }
+exit:
     return err;
 }

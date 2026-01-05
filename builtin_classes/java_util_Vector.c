@@ -159,9 +159,9 @@ static jvm_error_t vector_elementAt(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
@@ -199,9 +199,9 @@ static jvm_error_t vector_removeElementAt(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
@@ -250,9 +250,9 @@ static jvm_error_t vector_insertElementAt(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
@@ -394,9 +394,9 @@ static jvm_error_t vector_firstElement(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
@@ -433,9 +433,9 @@ static jvm_error_t vector_lastElement(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
@@ -548,9 +548,9 @@ static jvm_error_t VENUMER_nextElement(jvm_frame_t* frame){
             C_TO_JVM_VALUE(init_args[0], exception);
             errs = jvm_invoke(frame->jvm, frame, objectmanager_class_object_get_method(frame, ecobject, "<init>", "()V"), 1, init_args);
             if(errs == JVM_OK){
-                jvm_unlock(frame->jvm);
                 errs = jvm_throw(frame, exception);
-            } else jvm_unlock(frame->jvm);
+            }
+            jvm_unlock(frame->jvm);
         }
         (errs);
     }), exit);
