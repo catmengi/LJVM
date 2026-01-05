@@ -28,7 +28,10 @@ int main(){
 
     linker->jni_list = &jni_list;
 
-    classlinker_link(linker,loader);
+    if(classlinker_link(linker,loader) != CLASSLINKER_OK){
+        printf("failed to link!\n");
+        exit(1);
+    }
     classloader_destroy(loader);
 
     jvm_instance_t* jvm = jvm_new(linker, 2 * 1024 * 1024);

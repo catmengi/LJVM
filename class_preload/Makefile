@@ -1,2 +1,2 @@
 default:
-	javac   -XDignore.symbol.file   -cp ".:$JAVA_HOME/lib/tools.jar"   -J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED   -J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED   -J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED   -J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED   -J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED  --release=8 *.java
+	javac -source 1.4 -target 1.4 *.java

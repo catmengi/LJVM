@@ -146,7 +146,7 @@ void* parse_methodhandle(classloader_instance_t* instance, file_reader_t* reader
     FAIL_SET_JUMP(file_read_int(reader, &reference_index, sizeof(reference_index)),ret,NULL,exit);
     FAIL_SET_JUMP((ret = arena_calloc(instance->loader_arena,1,sizeof(*ret))),ret,NULL,exit);
 
-    ret->reference_kind = reference_kind - 1;
+    ret->reference_kind = reference_kind;
     ret->reference_index = reference_index - 1;
 
 exit:
@@ -154,6 +154,7 @@ exit:
 }
 
 void* parse_methodtype(classloader_instance_t* instance, file_reader_t* reader){
+    assert(0);
     classloader_constant_methodtype_t* ret = NULL;
 
     uint16_t descriptor_index = 0;
@@ -197,9 +198,9 @@ static classloader_error_t attribute_parse(classloader_instance_t* instance, fil
 
     output->name_index--;
 
-    FAIL_SET_JUMP((output->classloader_attribute = arena_alloc(instance->loader_arena,output->length)),err,CLASSLOADER_OOM,exit);
+    FAIL_SET_JUMP((output->classloader_attribute = arena_alloc(instance->loader_arena,output->length)) || output->length == 0,err,CLASSLOADER_OOM,exit);
 
-    FAIL_SET_JUMP(file_read_bytes(reader,output->classloader_attribute,output->length),err,CLASSLOADER_FILE_ERROR,exit);
+    FAIL_SET_JUMP(file_read_bytes(reader,output->classloader_attribute,output->length) || output->length == 0,err,CLASSLOADER_FILE_ERROR,exit);
 
 exit:
     return err;

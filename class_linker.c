@@ -427,7 +427,7 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
                     char* find_name = raw_class->constants[constant_class->name_index].data;
                     if(is_array(find_name) == EClass){
                         classlinker_class_t* found = classlinker_find_class(linker,find_name);
-                        FAIL_SET_JUMP(found,err,CLASSLINKER_NOTFOUND,exit);
+                        FAIL_SET_JUMP(found,err,({printf("%s: cannot find '%s'\n",__PRETTY_FUNCTION__,find_name); (CLASSLINKER_NOTFOUND);}),exit);
                         found->generation = found->parent ? found->parent->generation + 1 : 0;
 
                         class_info->constant_pool.constants[i].constant_value = found;
@@ -556,7 +556,6 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
 
                     switch(attr_type){
                         default:
-                            printf("%s : Unknown attribute '%s'\n",__PRETTY_FUNCTION__,attr_name);
                             break;
 
                         case ATTRIBUTE_CONSTVALUE:{
