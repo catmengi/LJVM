@@ -214,25 +214,28 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
 
     jvm_thread_t* current_thread = NULL;
     list_for_each_entry(current_thread,&jvm->threads, list){
-        if(current_thread->JThread && current_thread->JThread != jvm_current_thread->JThread){ //Main thread in my jvm is not a thread at all + try to not stop gc itself on some implementations)
+        if(current_thread != jvm_current_thread){ //try to not stop gc itself)
 
             //Call function to freeze thread (implemented via java because it is OS dependant. Know how to implement it on Windows and FreeRTOS but not on posix)
             jvm_frame_t freeze_frame = {
                 .jvm = jvm,
-                .locals = (jvm_value_t[1]){},
+                .locals = (jvm_value_t[1]){C_TO_NEW_JVM_VALUE(current_thread->JThread)},
             };
             INIT_LIST_HEAD(&freeze_frame.native_exceptions);
 
             classlinker_method_t* freeze_method = objectmanager_class_object_get_method(&freeze_frame,objectmanager_get_class_object_info(current_thread->JThread),
-                                                                             "os_freeze", "()V");
-            freeze_frame.method = freeze_method;
-            freeze_method->fn(&freeze_frame);
+                                                                             "os_suspend", "()V");
+
+            if(freeze_method){
+                freeze_frame.method = freeze_method;
+                freeze_method->fn(&freeze_frame);
+            }
             
 
             //Add it to used list and scan what it contains
 
-            list_del_init(&current_thread->list); //Remove from main object list and add to used list
-            list_add(&current_thread->list,&used_objects_list);
+            list_del_init(&current_thread->JThread->list); //Remove from main object list and add to used list
+            list_add(&current_thread->JThread->list,&used_objects_list);
             objectmanager_scan_object(jvm,current_thread->JThread,&used_objects_list);
         }
 
@@ -326,14 +329,13 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
 
     list_for_each_entry(current_thread, &jvm->threads, list){
         for(jvm_frame_t* cur = current_thread->topmost_frame; cur; cur = cur->previous_frame){
+            current_thread->JThread = hashmap_get(&pointer_fix_table,current_thread->JThread);
+
             //Step 1: patch local variables
             for(unsigned i = 0; i < cur->method->frame_descriptor.locals_count; i++){
                 jvm_value_t* value = &cur->locals[i];
                 if(value->type == EJVT_REFERENCE && *(void**)value->value){
-                    void* patch_value = hashmap_get(&pointer_fix_table,*(void**)value->value);
-                    assert(patch_value);
-
-                    *(void**)value->value = patch_value;
+                    *(void**)value->value = hashmap_get(&pointer_fix_table,*(void**)value->value);  
                 }
             }
 
@@ -341,23 +343,19 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
             for(unsigned i = 0; i < cur->stack.sp; i++){
                 jvm_value_t* value = &cur->stack.stack[i];
                 if(value->type == EJVT_REFERENCE && *(void**)value->value != NULL){
-                    void* patch_value = hashmap_get(&pointer_fix_table,*(void**)value->value);
-                    assert(patch_value);
-
-                    *(void**)value->value = patch_value;
+                    *(void**)value->value = hashmap_get(&pointer_fix_table,*(void**)value->value);  
                 }
             }
 
             jvm_native_exception_t* native_exception = NULL;
             list_for_each_entry(native_exception,&cur->native_exceptions,list){
                 native_exception->exception_object = hashmap_get(&pointer_fix_table,native_exception->exception_object);
-                assert(native_exception);
             } 
         }
     }
 
     objectmanager_object_t* cur_object = NULL;
-    list_for_each_entry(cur_object,&jvm->heap.object_list,list){
+    list_for_each_entry(cur_object,&jvm->heap.object_list,list){ //Patch all objects reference fields
         switch(cur_object->type){
             case EJOMOT_CLASS:{
                 objectmanager_class_object_t* class_object = cur_object->data;
@@ -369,11 +367,7 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
                         jvm_value_t* value = &class_object->fields[cur->generation][i].value;
 
                         if(value->type == EJVT_REFERENCE && *(void**)value->value){
-                            void* patch_value = hashmap_get(&pointer_fix_table,*(void**)value->value);
-                            assert(patch_value);
-
-                            *(void**)value->value = patch_value;
-                            
+                            *(void**)value->value = hashmap_get(&pointer_fix_table,*(void**)value->value);        
                         }
                     }
                 }
@@ -385,10 +379,7 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
                 for(unsigned i = 0; i < array_object->count; i++){
                     jvm_value_t* value = &array_object->elements[i];
                     if(value->type == EJVT_REFERENCE && *(void**)value->value){
-                        void* patch_value = hashmap_get(&pointer_fix_table,*(void**)value->value);
-                        assert(patch_value);
-
-                        *(void**)value->value = patch_value;
+                        *(void**)value->value = hashmap_get(&pointer_fix_table,*(void**)value->value);  
                     }
                 }
             }
@@ -397,16 +388,13 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     }
 
     classlinker_class_t* cur_class = NULL;
-    list_for_each_entry(cur_class,&jvm->linker->loaded_classes,list){
+    list_for_each_entry(cur_class,&jvm->linker->loaded_classes,list){ //Path static fields of classes
         if(cur_class->type == Earray) continue;
         classlinker_normalclass_t* class_info = cur_class->info;
         for(unsigned i = 0; i < class_info->static_fields_count; i++){
             jvm_value_t* value = &class_info->static_fields[i].value;
             if(value->type == EJVT_REFERENCE && *(void**)value->value){
-                void* patch_value = hashmap_get(&pointer_fix_table,*(void**)value->value);
-                assert(patch_value);
-
-                *(void**)value->value = patch_value;
+                *(void**)value->value = hashmap_get(&pointer_fix_table,*(void**)value->value);
             }
         }
 
@@ -414,7 +402,6 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
             classlinker_constant_t* constant = &class_info->constant_pool.constants[i];
             if(constant->constant_type == EJCT_string){ //Patch strings, because they may also be moved
                 constant->constant_value = hashmap_get(&pointer_fix_table,constant->constant_value);
-                assert(constant->constant_value);
             }
         }
     }
@@ -423,19 +410,21 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     hashmap_cleanup(&reverse_pointer_fix_table);
 
     list_for_each_entry(current_thread,&jvm->threads, list){
-        if(current_thread->JThread && current_thread->JThread != jvm_current_thread->JThread){ //Main thread in my jvm is not a thread at all + try to not stop gc itself on some implementations)
+        if(current_thread != jvm_current_thread){
 
             //Call function to unfreeze thread (implemented via java because it is OS dependant. Know how to implement it on Windows and FreeRTOS but not on posix)
             jvm_frame_t unfreeze_frame = {
                 .jvm = jvm,
-                .locals = (jvm_value_t[1]){},
+                .locals = (jvm_value_t[1]){C_TO_NEW_JVM_VALUE(current_thread->JThread)},
             };
             INIT_LIST_HEAD(&unfreeze_frame.native_exceptions);
 
             classlinker_method_t* unfreeze_method = objectmanager_class_object_get_method(&unfreeze_frame,objectmanager_get_class_object_info(current_thread->JThread),
-                                                                             "os_unfreeze", "()V");
-            unfreeze_frame.method = unfreeze_method;
-            unfreeze_method->fn(&unfreeze_frame);
+                                                                             "os_resume", "()V");
+            if(unfreeze_method){
+                unfreeze_frame.method = unfreeze_method;
+                unfreeze_method->fn(&unfreeze_frame);
+            }
 
         }
     }
@@ -559,7 +548,7 @@ objectmanager_array_object_t* objectmanager_get_array_object_info(objectmanager_
 
 classlinker_field_t* objectmanager_class_object_get_field(jvm_frame_t* frame, objectmanager_class_object_t* class_object,
                                                           char* name){
-    if(!frame || !name || !class_object) return NULL;
+    if(!name || !class_object) return NULL;
 
     for(classlinker_class_t* cur = class_object->class; cur; cur = cur->parent){
         classlinker_normalclass_t* class_info = cur->info;
@@ -567,7 +556,7 @@ classlinker_field_t* objectmanager_class_object_get_field(jvm_frame_t* frame, ob
             if(strcmp(class_object->fields[cur->generation][i].name, name) == 0){
 
                 if((class_object->fields[cur->generation][i].flags & ACC_PRIVATE) == ACC_PRIVATE){
-                    if(cur == frame->method->class)
+                    if(frame == NULL || cur == frame->method->class)
                         return &class_object->fields[cur->generation][i];
                     else continue;
                 } else return &class_object->fields[cur->generation][i];

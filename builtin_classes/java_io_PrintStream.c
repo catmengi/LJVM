@@ -253,7 +253,7 @@ static jvm_error_t printstream_println(jvm_frame_t* frame){
     FAIL_SET_JUMP(to_call,err,JVM_UNKNOWN,exit);
     FAIL_SET_JUMP(to_call(frame) == JVM_OK,err,JVM_UNKNOWN,exit);
 
-    *(uint32_t*)frame->locals[1].value = '\n';
+    C_TO_JVM_VALUE(frame->locals[1],(char)'\n');
     err = printstream_printchar(frame);
 exit:
     return err;
@@ -438,8 +438,8 @@ classlinker_normalclass_t java_io_PrintStream_info = {
         {
             .name = "println",
             .raw_description = "(Ljava/lang/String;)V",
-            .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
+            .frame_descriptor.locals_count = 1,
             .frame_descriptor.stack_size = 1,
             .fn = printstream_println,
             .flags = ACC_NATIVE,

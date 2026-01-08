@@ -326,8 +326,12 @@ void parse_description(classlinker_methoddescription_t* output, char* descriptio
 
 classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader_instance_t* loader){
     builtin_classes_init(linker);
-
     classlinker_error_t err = CLASSLINKER_OK;
+
+    if(loader->loaded_from){
+        linker->loaded_from = arena_strdup(linker->arena,loader->loaded_from);
+        assert(linker->loaded_from);
+    }
 
     unsigned symmap_size = loader->classes_stats.classes_referenced;
     classlinker_class_t* linkable_class = NULL;

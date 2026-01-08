@@ -1,5 +1,6 @@
 #define ARENA_IMPLEMENTATION
 
+
 #include "class_loader.h"
 #include "reader.h"
 
@@ -251,6 +252,10 @@ classloader_error_t classloader_load_folder(classloader_instance_t* instance, co
     dir_fd = opendir(path);
     FAIL_SET_JUMP(dir_fd, err, CLASSLOADER_FILE_ERROR, exit);
 
+    if(instance->loaded_from)
+        arena_free_block(instance->loaded_from);
+
+    instance->loaded_from = arena_strdup(instance->loader_arena,path);
     while ((in_file = readdir(dir_fd))) {
         if (strstr(in_file->d_name, ".class") && in_file->d_name[strlen(in_file->d_name) - 6] == '.' &&
             in_file->d_name[strlen(in_file->d_name) - 5] == 'c' &&

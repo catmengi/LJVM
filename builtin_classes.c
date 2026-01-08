@@ -24,6 +24,10 @@ extern classlinker_class_t java_lang_IndexOutOfBoundsException;
 extern classlinker_class_t java_lang_StringIndexOutOfBoundsException;
 extern classlinker_class_t java_lang_IllegalArgumentException;
 extern classlinker_class_t java_lang_NoSuchElementException;
+extern classlinker_class_t java_lang_Runnable;
+extern classlinker_class_t java_lang_Thread;
+extern classlinker_class_t java_util_EmptyStackException;
+extern classlinker_class_t ljvm_class_launcher;
 
 classlinker_class_t* builtin_classes[] = {
     &java_lang_Object,
@@ -39,6 +43,10 @@ classlinker_class_t* builtin_classes[] = {
     &java_lang_StringIndexOutOfBoundsException, 
     &java_lang_IllegalArgumentException,
     &java_lang_NoSuchElementException,
+    &java_util_EmptyStackException,
+    &ljvm_class_launcher,
+    &java_lang_Runnable,
+    &java_lang_Thread,
     &vector_enumerator,
     &java_util_Vector,
     &java_util_Enumeration,

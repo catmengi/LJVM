@@ -5,6 +5,8 @@
 
 #include "jvm_method.h"
 
+#include <stdatomic.h>
+
 typedef enum{
     EJVT_BYTE = 'B',
     EJVT_CHAR = 'C',
@@ -71,14 +73,21 @@ typedef struct jvm_instance_t{
     classlinker_instance_t* linker;
 
     objectmanager_heap_t heap;
+
+    atomic_uint thread_count;
     struct list_head threads;
+
+    pthread_mutex_t lock;
+    pthread_cond_t jvm_exit_wait;
 }jvm_instance_t;
 
 jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size); //Creates new jvm
 jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, char** args); //Launches specified class
+void jvm_wait_exit(jvm_instance_t* instance);
 
 //NOTE ABOUT LJNI: Allocations done by native function and doesnt stored in classes, objects, frame locals, frame stack are invisible to GC, and it will treat them as unused!
 //So if you need to allocate something from native function, please store it to local variable immeadiatly after you allocate. like this: C_TO_JVM_VALUE(frame->locals[N],objectmanager_new_*_object)!!!!
+//Or lock the jvm!
 jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, classlinker_method_t* callable_method, unsigned nargs, jvm_value_t args[]);
                         //Invokes function, bytecode or native, from passed method with passed arguments. Pass 'this' as args[0]!
 

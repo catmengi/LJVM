@@ -37,5 +37,6 @@ int main(){
     jvm_instance_t* jvm = jvm_new(linker, 2 * 1024 * 1024);
 
     printf("jvm exit code: %d\n",jvm_launch_class(jvm,"test_app",1,(char*[]){"Hello world!\n"}));
+    jvm_wait_exit(jvm);
     return 0;
 }

@@ -271,19 +271,14 @@ jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
     instance->arena = arena;
     instance->linker = linker;
 
+    pthread_mutexattr_t lockattr;
+    pthread_mutexattr_init(&lockattr);
+    pthread_mutexattr_settype(&lockattr,PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&instance->lock,&lockattr);
+
     assert(objectmanager_init_heap(instance,heap_size) == JVM_OK);
 
-    jvm_thread_t* main_thread = arena_alloc(instance->arena,sizeof(*main_thread));
-    assert(main_thread);
-
     INIT_LIST_HEAD(&instance->threads);
-    INIT_LIST_HEAD(&main_thread->list);
-    main_thread->JThread = NULL; //main isnt java thread fully;
-    main_thread->topmost_frame = NULL; //currently no frame
-
-    jvm_current_thread = main_thread;
-
-    list_add(&main_thread->list,&instance->threads);
 
     classlinker_class_t* class = NULL;
     list_for_each_entry(class,&linker->loaded_classes,list){
@@ -291,22 +286,24 @@ jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
             jvm_invokestatic(instance,NULL,classlinker_find_method(NULL,class, "<clinit>", NULL),0,NULL);
         }
     }
+    instance->thread_count = 0;
+    pthread_cond_init(&instance->jvm_exit_wait,NULL);
 
     return instance;
 }
 
 void jvm_lock(jvm_instance_t* jvm){
-
+    pthread_mutex_lock(&jvm->lock);
 }
 void jvm_unlock(jvm_instance_t* jvm){
-
+    pthread_mutex_unlock(&jvm->lock);
 }
 
 jvm_error_t jvm_bytecode_executor(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
     classlinker_bytecode_t* bytecode = frame->method->userctx;
 
-    void** arguments = arena_alloc(frame->jvm->arena,OPCODE_MAX_ARGUMENTS * sizeof(void*));
+    void** arguments = arena_alloc(frame->jvm->arena,OPCODE_MAX_ARGUMENTS * sizeof(void*)); // TODO: allocate arguments once per thread!!!!!
     FAIL_SET_JUMP(arguments,err,JVM_OOM,exit);
 
     for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
@@ -382,7 +379,7 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
     memset(frame.locals,0,callable_method->frame_descriptor.locals_count * sizeof(*frame.locals));
     memset(frame.stack.stack,0,callable_method->frame_descriptor.stack_size * sizeof(*frame.stack.stack));
 
-    jvm_current_thread->topmost_frame = &frame;
+    if(jvm_current_thread) jvm_current_thread->topmost_frame = &frame;
 
     FAIL_SET_JUMP(nargs <= frame.method->frame_descriptor.locals_count || nargs == 0,err,JVM_OPCODE_INVALID,exit);
     FAIL_SET_JUMP(callable_method->fn,err,JVM_NOTFOUND,exit);
@@ -407,7 +404,7 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
     FAIL_SET_JUMP(method_err == JVM_OK,err,method_err,exit);
     //===============
 
-    jvm_current_thread->topmost_frame =jvm_current_thread->topmost_frame->previous_frame;
+    if(jvm_current_thread) jvm_current_thread->topmost_frame = jvm_current_thread->topmost_frame->previous_frame;
 
 exit:
     return err;
@@ -499,43 +496,31 @@ jvm_value_t jvm_native_get_return(jvm_frame_t* frame){
 jvm_error_t jvm_launch_class(jvm_instance_t* instance, char* class, int nargs, char** args){
     jvm_error_t err = JVM_OK;
 
-    classlinker_class_t* found_class = classlinker_find_class(instance->linker, class);
-    FAIL_SET_JUMP(found_class,err,JVM_NOTFOUND,exit);
+    //Assume that there is NO reason for GC to be trigger, so dont save our allocations anywhere (there is nowhere to store)
+    objectmanager_object_t* launcher = objectmanager_new_class_object(&(jvm_frame_t){instance}, classlinker_find_class(instance->linker,"ljvm/class_launcher"));
+    FAIL_SET_JUMP(launcher,err,JVM_NOTFOUND,exit);
 
-    jvm_frame_t frame = {
-        .jvm = instance,
-    };
+    jvm_value_t init_args[] = {C_TO_NEW_JVM_VALUE(launcher),C_TO_NEW_JVM_VALUE(class),C_TO_NEW_JVM_VALUE((char*)"main"),C_TO_NEW_JVM_VALUE(nargs),C_TO_NEW_JVM_VALUE(args)};
+    int init_nargs = sizeof(init_args) / sizeof(init_args[0]);
 
-    classlinker_method_t* method = classlinker_find_method(&frame,found_class,"main","([Ljava/lang/String;)V");
-    FAIL_SET_JUMP(method,err,JVM_NOTFOUND,exit);
+    classlinker_method_t* launcher_init = objectmanager_class_object_get_method(NULL, objectmanager_get_class_object_info(launcher), "<init>", "(***I*)V");
+    FAIL_SET_JUMP(launcher_init,err,JVM_NOTFOUND,exit);
 
-    objectmanager_object_t* args_object = objectmanager_new_array_object(&(jvm_frame_t){instance}, EJVT_REFERENCE, nargs);
-    FAIL_SET_JUMP(args_object,err,JVM_OOM,exit);
+    FAIL_SET_JUMP(jvm_invoke(instance,NULL,launcher_init,init_nargs,init_args) == JVM_OK,err,JVM_UNKNOWN,exit);
 
-    objectmanager_array_object_t* args_array = objectmanager_get_array_object_info(args_object);
-    for(unsigned i = 0; i < args_array->count; i++){
-        objectmanager_object_t* string_arg = objectmanager_new_class_object(&frame,classlinker_find_class(instance->linker,"java/lang/String"));
-        FAIL_SET_JUMP(string_arg,err,JVM_OOM,exit);
-
-        classlinker_method_t* init = objectmanager_class_object_get_method(&frame,objectmanager_get_class_object_info(string_arg),"<init>", "(*)V");
-        FAIL_SET_JUMP(init,err,JVM_NOTFOUND,exit);
-
-        jvm_value_t init_args[] = {{EJVT_REFERENCE},{EJVT_REFERENCE}};
-        *(void**)init_args[0].value = string_arg;
-        *(void**)init_args[1].value = args[i];
-
-        jvm_error_t init_err = jvm_invoke(instance,NULL,init,2,init_args);
-        FAIL_SET_JUMP(init_err == JVM_OK,err,init_err,exit);
-
-        *(void**)args_array->elements[i].value = string_arg;
-    }
-
-    jvm_value_t invoke_args[] = {{EJVT_REFERENCE}};
-    *(void**)invoke_args[0].value = args_object;
-
-    jvm_error_t main_err = jvm_invoke(instance,NULL,method,1,invoke_args);
-    FAIL_SET_JUMP(main_err == JVM_OK,err,main_err,exit);
+    classlinker_method_t* launcher_start = objectmanager_class_object_get_method(NULL, objectmanager_get_class_object_info(launcher), "start", "()V");
+    FAIL_SET_JUMP(launcher_start,err,JVM_NOTFOUND,exit);
+    
+    jvm_value_t run_args[] = {C_TO_NEW_JVM_VALUE(launcher)};
+    err = jvm_invoke(instance,NULL,launcher_start,1,run_args);
 
 exit:
     return err;
+}
+
+void jvm_wait_exit(jvm_instance_t* instance){
+    if(instance){
+        pthread_mutex_t dummy = PTHREAD_MUTEX_INITIALIZER;
+        pthread_cond_wait(&instance->jvm_exit_wait,&dummy);
+    }
 }

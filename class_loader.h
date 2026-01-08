@@ -8,7 +8,7 @@
 
 #ifdef __FSJ_DO_BREAK__
 static void FSJ_BREAK(){}
-#define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); printf("%s:%d ERROR HAPPENED, CODE: %x\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); FSJ_BREAK(); goto label;}}
+#define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); printf("%s:%d ERROR HAPPENED, CODE: %d\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); FSJ_BREAK(); goto label;}}
 #else
 #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); goto label;}}
 #endif
@@ -29,6 +29,7 @@ typedef enum{
 }classloader_error_t;
 
 typedef struct{
+	char* loaded_from;
     struct list_head loaded_classes;
     Arena* loader_arena;
 
