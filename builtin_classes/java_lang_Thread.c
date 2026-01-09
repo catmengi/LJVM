@@ -36,7 +36,7 @@ static void posix_thread_cleanup(void* params){
     jvm_instance_t* jvm = params;
     jvm_lock(jvm);
 
-    C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(jvm_current_thread->JThread), "thread")->value,(void*)NULL);
+    C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(jvm_current_thread->JThread), "thread")->value,(pthread_t)NULL);
 
     list_del(&jvm_current_thread->list);
     arena_free_block(jvm_current_thread);
@@ -113,11 +113,11 @@ static jvm_error_t os_stop(jvm_frame_t* frame){
     objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
     objectmanager_class_object_t* cself = objectmanager_get_class_object_info(self);
     
-    pthread_t* thread = (pthread_t*)objectmanager_class_object_get_field(frame, cself, "thread")->value.value;
-    if(thread && *thread){
+    pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(frame, cself, "thread")->value,pthread_t);
+    if(thread){
         jvm_lock(frame->jvm);
 
-        pthread_cancel(*thread);
+        pthread_cancel(thread);
 
         jvm_unlock(frame->jvm);
     }
