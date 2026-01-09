@@ -11,19 +11,14 @@
 
 #include <pthread.h>
 
+static objectmanager_object_t* array_JLObject = NULL;
+
 static uint32_t nextby(uint32_t value, uint32_t by){
     if (value % by == 0) {
         return value; // Already divisible by 16
     }
     return (value / by + 1) * by; // Calculate the next multiple of 16
 }
-
-static objectmanager_object_t array_JLOobject = {
-    .type = EJOMOT_CLASS,
-    .list = LIST_HEAD_INIT(array_JLOobject.list),
-    .data = &(objectmanager_class_object_t){0},
-    .size = sizeof(array_JLOobject) + sizeof(objectmanager_class_object_t),
-};
 
 jvm_error_t objectmanager_init_heap(jvm_instance_t* jvm, uint32_t heap_size){
     INIT_LIST_HEAD(&jvm->heap.object_list);
@@ -34,8 +29,8 @@ jvm_error_t objectmanager_init_heap(jvm_instance_t* jvm, uint32_t heap_size){
     jvm->heap.gc_heap = arena_new_dynamic(jvm->heap.gc_heapsize);
     assert(jvm->heap.gc_heap);
 
-    ((objectmanager_class_object_t*)array_JLOobject.data)->class = classlinker_find_class(jvm->linker, "java/lang/Object");
-    assert(((objectmanager_class_object_t*)array_JLOobject.data)->class);
+    array_JLObject = objectmanager_new_class_object(&(jvm_frame_t){jvm},classlinker_find_class(jvm->linker,"java/lang/Object"));
+    assert(array_JLObject);
 
     return JVM_OK;
 }
@@ -77,7 +72,7 @@ void objectmanager_object_clone_into(objectmanager_object_t* object, struct list
             objectmanager_array_object_t* array = memory + sizeof(objectmanager_object_t);
             new_object->data = array;
 
-            array->JLObject = &array_JLOobject;
+            array->JLObject = array_JLObject;
             array->elements = memory + sizeof(objectmanager_object_t) + sizeof(objectmanager_array_object_t);
         }
         break;
@@ -293,6 +288,9 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
 
             finalize_method->fn(&finalize_frame);
         }
+        //I hope that it is already safe too delete this mutex
+        mutex_destroy(objectmanager_get_class_object_info(finalize_cur)->synclock);
+        arena_free_block(objectmanager_get_class_object_info(finalize_cur)->synclock); 
     }
 
     objectmanager_object_t* used_object = NULL; //Copy used objects
@@ -472,7 +470,12 @@ objectmanager_object_t* objectmanager_new_class_object(jvm_frame_t* frame,
 
     cobject->class = class;
     cobject->fields = cobject_fields_memory;
-    
+    cobject->synclock = arena_alloc(frame->jvm->arena,sizeof(mutex_t)); //we should allocate from unmovable heap
+    if(cobject->synclock == NULL){
+        new_object = NULL; //OOM
+        goto exit;
+    } else mutex_init(cobject->synclock);
+
     void* cur_fields_mem = cobject_fields_content_memory;
     for(classlinker_class_t* cur_class = cobject->class; cur_class; cur_class = cur_class->parent){
         classlinker_normalclass_t* class_info = cur_class->info;
@@ -514,7 +517,7 @@ objectmanager_object_t* objectmanager_new_array_object(jvm_frame_t* frame, jvm_v
     array_obj->data = array;
     array_obj->size = alloc_size;
 
-    array->JLObject = &array_JLOobject;
+    array->JLObject = array_JLObject;
     array->elements = memory + sizeof(objectmanager_object_t) + sizeof(objectmanager_array_object_t);
     array->count = size;
 
@@ -585,11 +588,11 @@ objectmanager_object_t* objectmanager_object_clone(jvm_frame_t* frame, objectman
     return new_object;
 }
 
-void objectmanager_object_lock(objectmanager_object_t* object){
-
+void objectmanager_object_synclock(objectmanager_object_t* object){
+    mutex_lock(objectmanager_get_class_object_info(object)->synclock);
 }
-void objectmanager_object_unlock(objectmanager_object_t* object){
-    
+void objectmanager_object_syncunlock(objectmanager_object_t* object){
+    mutex_unlock(objectmanager_get_class_object_info(object)->synclock);  
 }
 
 static uint32_t h31_hash(const char* s, size_t len)

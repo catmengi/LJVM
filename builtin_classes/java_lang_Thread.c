@@ -36,6 +36,8 @@ static void posix_thread_cleanup(void* params){
     jvm_instance_t* jvm = params;
     jvm_lock(jvm);
 
+    C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(jvm_current_thread->JThread), "thread")->value,(void*)NULL);
+
     list_del(&jvm_current_thread->list);
     arena_free_block(jvm_current_thread);
     jvm_current_thread = NULL;
@@ -73,14 +75,13 @@ static void* native_thread(void* params_p){
     pthread_cleanup_push(posix_thread_cleanup,jvm);
     jvm_unlock(jvm);
 
-
-    
-    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL); //Can cancel thread while it executes something non system
-
     objectmanager_class_object_t* crunnable = objectmanager_get_class_object_info(runnable);
-
     classlinker_method_t* run = objectmanager_class_object_get_method(&(jvm_frame_t){jvm}, crunnable, "run", "()V");
+
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL); //Can cancel it. If it mess something up - whatever, because thread cancelation is triggered
+                                                                            //only when JVM exits, so whatever
+
     jvm_value_t args[1] = {C_TO_NEW_JVM_VALUE(runnable)};
 
     jvm_error_t err = jvm_invoke(jvm,NULL,run,1,args);
@@ -102,7 +103,6 @@ static void* native_thread(void* params_p){
             }
         }
     }
-    C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(self), "thread")->value,(void*)NULL);
     pthread_cleanup_pop(1);
     jvm_unlock(jvm);
 
@@ -162,6 +162,48 @@ exit:
     return err;
 }
 
+static jvm_error_t thread_join(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(self), "thread")->value,pthread_t);
+    if(thread){
+        pthread_join(thread,NULL);
+    }
+    return JVM_OK;
+}
+
+static jvm_error_t thread_activeCount(jvm_frame_t* frame){
+    jvm_native_return(frame,C_TO_NEW_JVM_VALUE((uint32_t)frame->jvm->thread_count));
+    return JVM_OK;
+}
+
+static jvm_error_t thread_currentThread(jvm_frame_t* frame){
+    jvm_native_return(frame,C_TO_NEW_JVM_VALUE(jvm_current_thread->JThread));
+    return JVM_OK;    
+}
+
+static jvm_error_t thread_isAlive(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(self), "thread")->value,pthread_t);
+    bool is_alive = thread ? true : false;
+
+    jvm_native_return(frame,C_TO_NEW_JVM_VALUE(is_alive));
+    
+    return JVM_OK;
+}
+
+#include <unistd.h>
+static jvm_error_t thread_sleep(jvm_frame_t* frame){
+    uint64_t millis = JVM_TO_C_VALUE(frame->locals[0],typeof(millis));
+    usleep(millis * 1000);
+
+    return JVM_OK;
+}
+
+static jvm_error_t thread_yield(jvm_frame_t* frame){
+    sched_yield();
+    return JVM_OK;
+}
+
 static classlinker_normalclass_t Thread_info = {
     .fields_count = 2,
     .fields = (classlinker_field_t[]){
@@ -192,7 +234,7 @@ static classlinker_normalclass_t Thread_info = {
         },
     },
 
-    .methods_count = 6,
+    .methods_count = 12,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -224,6 +266,43 @@ static classlinker_normalclass_t Thread_info = {
             .raw_description = "()V",
             .flags = ACC_NATIVE,
             .fn = thread_start,
+        },
+        {
+            .name = "join",
+            .raw_description = "()V",
+            .flags = ACC_NATIVE,
+            .fn = thread_join,
+        },
+        {
+            .name = "isAlive",
+            .raw_description = "()Z",
+            .flags = ACC_NATIVE,
+            .fn = thread_isAlive,
+        },
+        {
+            .name = "activeCount",
+            .raw_description = "()I",
+            .flags = ACC_NATIVE | ACC_STATIC,
+            .fn = thread_activeCount,
+        },
+        {
+            .name = "yield",
+            .raw_description = "()V",
+            .flags = ACC_NATIVE | ACC_STATIC,
+            .fn = thread_yield,
+        },
+        {
+            .name = "sleep",
+            .raw_description = "(J)V",
+            .frame_descriptor.arguments_count = 1,
+            .flags = ACC_NATIVE | ACC_STATIC,
+            .fn = thread_sleep,
+        },
+        {
+            .name = "currentThread",
+            .raw_description = "()Ljava/lang/Thread;",
+            .flags = ACC_NATIVE | ACC_STATIC,
+            .fn = thread_currentThread,
         },
         {
             .name = "run",

@@ -2,6 +2,8 @@
 #include "../jvm_internal.h"
 #include "../object.h"
 #include "../class_linker.h"
+#include <pthread.h>
+#include <time.h>
 
 extern classlinker_class_t java_lang_Object;
 
@@ -10,6 +12,8 @@ static jvm_error_t system_gc(jvm_frame_t* frame);
 static jvm_error_t system_exit(jvm_frame_t* frame);
 static jvm_error_t system_arraycopy(jvm_frame_t* frame);
 static jvm_error_t system_clinit(jvm_frame_t* frame);
+static jvm_error_t currentTimeMillis(jvm_frame_t* frame);
+static jvm_error_t indentityHashCode(jvm_frame_t* frame);
 
 
 classlinker_normalclass_t java_lang_System_info = {
@@ -25,7 +29,7 @@ classlinker_normalclass_t java_lang_System_info = {
         }
     },
 
-    .methods_count = 4,
+    .methods_count = 6,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -37,6 +41,7 @@ classlinker_normalclass_t java_lang_System_info = {
         {
             .name = "exit",
             .raw_description = "(I)V",
+            .frame_descriptor.arguments_count = 1,
             .fn = system_exit,
             .flags = ACC_STATIC | ACC_NATIVE,
 
@@ -46,7 +51,19 @@ classlinker_normalclass_t java_lang_System_info = {
             .raw_description = "()V",
             .fn = system_gc,
             .flags = ACC_STATIC | ACC_NATIVE,
-
+        },
+        {
+            .name = "currentTimeMillis",
+            .raw_description = "()J",
+            .fn = currentTimeMillis,
+            .flags = ACC_STATIC | ACC_NATIVE,
+        },
+        {
+            .name = "indentityHashCode",
+            .raw_description = "()I",
+            .frame_descriptor.arguments_count = 1,
+            .fn = indentityHashCode,
+            .flags = ACC_STATIC | ACC_NATIVE,
         },
         {
             .name = "arraycopy",
@@ -69,6 +86,23 @@ classlinker_class_t java_lang_System = {
 //насильно вызывает сборщик мусора попытаться отчистить память(может не получиться) 
 static jvm_error_t system_gc(jvm_frame_t* frame) {
     objectmanager_gc(frame->jvm, 0);
+    return JVM_OK;
+}
+
+static jvm_error_t currentTimeMillis(jvm_frame_t* frame){
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME,&t);
+    int64_t milliseconds = (int64_t)t.tv_sec * 1000 + (int64_t)t.tv_nsec / 1000000;
+
+    jvm_native_return(frame,C_TO_NEW_JVM_VALUE(milliseconds));
+    return JVM_OK;
+}
+
+static jvm_error_t indentityHashCode(jvm_frame_t* frame){
+    objectmanager_object_t* to_hash = JVM_TO_C_VALUE(frame->locals[0],typeof(to_hash));
+    uint32_t hash = objectmanager_hash(to_hash);
+
+    jvm_native_return(frame,C_TO_NEW_JVM_VALUE(hash));
     return JVM_OK;
 }
 

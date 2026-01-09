@@ -21,6 +21,7 @@ typedef struct objectmanager_object_t{
 }objectmanager_object_t;
 
 typedef struct{
+    mutex_t* synclock;
     classlinker_class_t* class;
     classlinker_field_t** fields; //2D field array, addressed via class generation
 }objectmanager_class_object_t;
@@ -58,5 +59,5 @@ objectmanager_array_object_t* objectmanager_get_array_object_info(objectmanager_
 
 uint32_t objectmanager_hash(objectmanager_object_t* object);
 
-void objectmanager_object_lock(objectmanager_object_t* object);
-void objectmanager_object_unlock(objectmanager_object_t* object);
+void objectmanager_object_synclock(objectmanager_object_t* object);
+void objectmanager_object_syncunlock(objectmanager_object_t* object);

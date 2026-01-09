@@ -1,9 +1,9 @@
 #pragma once
 
 #include "class_loader.h"
+#include "os_support.h"
 
 #include "list.h"
-#include "os_support.h"
 
 typedef enum{
     CLASSLINKER_UNKNOWN = -1,
@@ -33,6 +33,7 @@ typedef enum{
 typedef struct classlinker_class_t classlinker_class_t;
 typedef struct classlinker_class_t{
     struct list_head list;
+    mutex_t synclock;
 
     classloader_class_t* raw_class; //Temporary pointer, used only while linking
 
@@ -170,5 +171,5 @@ classlinker_field_t* classlinker_find_staticfield(jvm_frame_t* frame, classlinke
 bool classlinker_is_classes_compatible(classlinker_class_t* class, classlinker_class_t* compatible_to);
 
 
-void classlinker_class_lock(classlinker_class_t* class);
-void classlinker_class_unlock(classlinker_class_t* class);
+void classlinker_class_synclock(classlinker_class_t* class);
+void classlinker_class_syncunlock(classlinker_class_t* class);

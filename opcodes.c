@@ -1632,11 +1632,11 @@ jvm_error_t jvm_monitor_opcodes(jvm_opcode_t opcode, jvm_frame_t* frame, classli
     switch(opcode){
         default: break;
         case OP_MONITORENTER:
-            objectmanager_object_lock(object);
+            objectmanager_object_synclock(object);
             break;
 
         case OP_MONITOREXIT:
-            objectmanager_object_unlock(object);
+            objectmanager_object_syncunlock(object);
             break;
 
     }

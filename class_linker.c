@@ -333,12 +333,11 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
         assert(linker->loaded_from);
     }
 
-    unsigned symmap_size = loader->classes_stats.classes_referenced;
     classlinker_class_t* linkable_class = NULL;
 
-    //Step -2: counting preloaded classes
+    //Step -2: counting preloaded classes and initialising mutexes
     list_for_each_entry(linkable_class,&linker->loaded_classes,list){
-        symmap_size++;
+        mutex_init(&linkable_class->synclock);
         if(linkable_class->parent){
             char* parent_name = linkable_class->parent->this_name;
             linkable_class->parent = classlinker_find_class(linker, parent_name);
@@ -368,6 +367,8 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
         //Creating ========
         classlinker_class_t* new_class = arena_calloc(linker->arena,1,sizeof(*new_class));
         FAIL_SET_JUMP(new_class,err,CLASSLINKER_OOM,exit);
+
+        mutex_init(&new_class->synclock);
 
         INIT_LIST_HEAD(&new_class->list);
         list_add_tail(&new_class->list,&linker->loaded_classes);
@@ -778,10 +779,10 @@ bool classlinker_is_classes_compatible(classlinker_class_t* class, classlinker_c
     return false;
 }
 
-void classlinker_class_lock(classlinker_class_t* class){
+void classlinker_class_synclock(classlinker_class_t* class){
 
 }
 
-void classlinker_class_unlock(classlinker_class_t* class){
-    
+void classlinker_class_syncunlock(classlinker_class_t* class){
+    mutex_init(&class->synclock);
 }

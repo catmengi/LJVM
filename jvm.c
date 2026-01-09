@@ -391,14 +391,14 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
     //Object/class lock section
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
         (callable_method->flags & ACC_STATIC) == ACC_STATIC ? 
-                    classlinker_class_unlock(callable_method->class) : objectmanager_object_unlock(*(void**)frame.locals[0].value);
+                    classlinker_class_syncunlock(callable_method->class) : objectmanager_object_syncunlock(*(void**)frame.locals[0].value);
     }
 
     jvm_error_t method_err = callable_method->fn(&frame);
 
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
         (callable_method->flags & ACC_STATIC) == ACC_STATIC ? 
-                    classlinker_class_unlock(callable_method->class) : objectmanager_object_unlock(*(void**)frame.locals[0].value);
+                    classlinker_class_syncunlock(callable_method->class) : objectmanager_object_syncunlock(*(void**)frame.locals[0].value);
     }
 
     FAIL_SET_JUMP(method_err == JVM_OK,err,method_err,exit);
@@ -522,5 +522,6 @@ void jvm_wait_exit(jvm_instance_t* instance){
     if(instance){
         pthread_mutex_t dummy = PTHREAD_MUTEX_INITIALIZER;
         pthread_cond_wait(&instance->jvm_exit_wait,&dummy);
+        pthread_mutex_destroy(&dummy);
     }
 }
