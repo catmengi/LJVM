@@ -4,16 +4,16 @@ class thread implements Runnable{
 	String msg = "Thread!!!!";
 	int duration = 0;
 	thread(String m, int d){
-		msg = m;
+		if(m != null) msg = m;
 		duration = d;
 	}
 	synchronized public void run(){
 		for(int i = 0; i < duration; i++){
-			System.out.println(msg);
+			System.out.println(Thread.currentThread());
 		}
-		System.exit(0);
 	}
 }
+
 class test_app{
 	public static native void debug_segfault(String[] args);
 
@@ -34,15 +34,16 @@ class test_app{
 		//System.out.println((String)ht.get("hewo"));
 		//System.out.println((String)ht.get("Fuck!"));
 
-		thread n = new thread("t1",4096);
-		thread n2 = new thread("t2",1000000);
-		Thread t = new Thread(n);
-		Thread t2 = new Thread(n2);
+		Thread threads[] = new Thread[256]; //Should exhaust current monitor pool
+		for(int i = 0; i < threads.length; i++){
+			threads[i] = new Thread(((Runnable)(new thread("thread",32))));
+			threads[i].start();
+		} 
 
-		t.start();
-		t2.start();
-
-		//System.out.println("Fuck!");
-		for(;;){}
+		for(int i = 0; i < threads.length; i++){
+			try {
+				threads[i].join();
+			}catch (Throwable e){e.printStackTrace();};
+		} 
 	}
 }

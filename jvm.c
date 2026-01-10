@@ -18,7 +18,9 @@
 
 __thread jvm_thread_t* jvm_current_thread = NULL;
 
-#define OPCODE_MAX_ARGUMENTS 8
+#define OPCODE_MAX_ARGUMENTS 4
+#define JVM_RESERVED_MEMORY 128 * 1024
+
 static jvm_opcode_executor_t opcode_executors[211] = {
     [OP_NOP] = {0,NULL,jvm_nop_opcode},
 
@@ -261,7 +263,6 @@ static jvm_opcode_executor_t opcode_executors[211] = {
 
 };
 
-#define JVM_RESERVED_MEMORY 64 * 1024
 
 jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
     Arena* arena = arena_new_dynamic(sizeof(jvm_instance_t*) + JVM_RESERVED_MEMORY);
@@ -301,24 +302,9 @@ jvm_error_t jvm_bytecode_executor(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
     classlinker_bytecode_t* bytecode = frame->method->userctx;
 
-    void** arguments = jvm_current_thread ? jvm_current_thread->bytecode_executor_arguments : NULL;
-    if(arguments == NULL){
-        if(jvm_current_thread == NULL){
-            arguments = alloca(OPCODE_MAX_ARGUMENTS * sizeof(void*));
-            for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
-                arguments[i] = alloca(sizeof(uint64_t));
-            }
-        } else {
-            jvm_current_thread->bytecode_executor_arguments = arena_alloc(frame->jvm->arena,OPCODE_MAX_ARGUMENTS * sizeof(void*));
-            FAIL_SET_JUMP(jvm_current_thread->bytecode_executor_arguments,err,JVM_OOM,exit);
-
-            arguments = jvm_current_thread->bytecode_executor_arguments;
-            for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
-                arguments[i] = arena_alloc(frame->jvm->arena,sizeof(uint64_t));
-                FAIL_SET_JUMP(arguments[i],err,JVM_OOM,exit);
-            }
-        }
-    }
+    void** arguments = alloca(OPCODE_MAX_ARGUMENTS * sizeof(void*));
+    for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++)
+        arguments[i] = alloca(sizeof(uint64_t));
 
     for(;frame->pc < bytecode->code_length; frame->pc++){
         {
@@ -478,9 +464,13 @@ objectmanager_object_t* jvm_native_catch_exception(jvm_frame_t* frame){ //Native
     jvm_native_exception_t* exception = NULL;
     jvm_native_exception_t* tmp = NULL;
     list_for_each_entry_safe(exception,tmp,&frame->native_exceptions,list){
+        jvm_lock(frame->jvm);
+
         objectmanager_object_t* ret = exception->exception_object;
         list_del(&exception->list);
         arena_free_block(exception);
+
+        jvm_unlock(frame->jvm);
 
         return ret;
     }

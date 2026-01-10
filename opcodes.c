@@ -1,5 +1,4 @@
 #include "opcodes.h"
-#include "arena.h"
 #include "class_linker.h"
 #include "class_loader.h"
 

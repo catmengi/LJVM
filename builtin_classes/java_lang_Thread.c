@@ -28,6 +28,26 @@ static jvm_error_t thread_init_target(jvm_frame_t* frame){
     return JVM_OK;
 }
 
+static jvm_error_t thread_init_target_name(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    objectmanager_class_object_get_field(frame, objectmanager_get_class_object_info(self), "name")->value = frame->locals[2];
+
+    return thread_init_target(frame);
+}
+
+static jvm_error_t thread_init_name(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    objectmanager_class_object_get_field(frame, objectmanager_get_class_object_info(self), "name")->value = frame->locals[1];
+
+    return JVM_OK;
+}
+
+static jvm_error_t thread_getName(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    jvm_native_return(frame,objectmanager_class_object_get_field(frame, objectmanager_get_class_object_info(self), "name")->value);
+    return JVM_OK;
+}
+
 static jvm_error_t thread_init(jvm_frame_t* frame){
     return JVM_OK;
 }
@@ -38,20 +58,15 @@ static void posix_thread_cleanup(void* params){
 
     C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(jvm_current_thread->JThread), "thread")->value,(pthread_t)NULL);
 
-    if(jvm_current_thread->bytecode_executor_arguments)
-        arena_free_block(jvm_current_thread->bytecode_executor_arguments);
-
     list_del(&jvm_current_thread->list);
     arena_free_block(jvm_current_thread);
-    jvm_current_thread = NULL;
     jvm->thread_count--;
 
+    jvm_current_thread = NULL;
     if(jvm->thread_count == 0){
         objectmanager_gc(jvm,0); //Finalize stuff like files and etc
         pthread_cond_broadcast(&jvm->jvm_exit_wait);
     }
-
-    pthread_detach(pthread_self());
     jvm_unlock(jvm);
 }
 
@@ -71,12 +86,12 @@ static void* native_thread(void* params_p){
 
     INIT_LIST_HEAD(&new_thread->list);
     new_thread->JThread = self;
-    list_add(&new_thread->list,&jvm->threads);
-
     new_thread->jvm = jvm;
 
     jvm_current_thread = new_thread;
     jvm->thread_count++;
+    list_add(&new_thread->list,&jvm->threads);
+
     pthread_cleanup_push(posix_thread_cleanup,NULL);
     jvm_unlock(jvm);
 
@@ -108,10 +123,11 @@ static void* native_thread(void* params_p){
             }
         }
     }
-    pthread_cleanup_pop(1);
     jvm_unlock(jvm);
 
+    pthread_cleanup_pop(1);
     pthread_exit(NULL);
+    return NULL;
 }
 
 static jvm_error_t os_stop(jvm_frame_t* frame){
@@ -123,11 +139,44 @@ static jvm_error_t os_stop(jvm_frame_t* frame){
         jvm_lock(frame->jvm);
 
         pthread_cancel(thread);
+        pthread_detach(thread);
 
         jvm_unlock(frame->jvm);
     }
     return JVM_OK;
 }
+
+#include <signal.h>
+static jvm_error_t os_suspend(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    objectmanager_class_object_t* cself = objectmanager_get_class_object_info(self);
+    
+    pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(frame, cself, "thread")->value,pthread_t);
+    if(thread){
+        jvm_lock(frame->jvm);
+
+        pthread_kill(thread,SIGSTOP);
+
+        jvm_unlock(frame->jvm);
+    }
+    return JVM_OK;    
+}
+
+static jvm_error_t os_resume(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    objectmanager_class_object_t* cself = objectmanager_get_class_object_info(self);
+    
+    pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(frame, cself, "thread")->value,pthread_t);
+    if(thread){
+        jvm_lock(frame->jvm);
+
+        pthread_kill(thread,SIGCONT);
+
+        jvm_unlock(frame->jvm);
+    }
+    return JVM_OK;    
+}
+
 
 static jvm_error_t thread_start(jvm_frame_t* frame){
     objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
@@ -186,6 +235,49 @@ static jvm_error_t thread_currentThread(jvm_frame_t* frame){
     return JVM_OK;    
 }
 
+static jvm_error_t thread_setPriority(jvm_frame_t* frame){
+    jvm_error_t err = JVM_OK;
+
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    uint32_t priority = JVM_TO_C_VALUE(frame->locals[1],typeof(priority));
+
+    uint32_t min = JVM_TO_C_VALUE(classlinker_find_staticfield(frame,frame->method->class,"MIN_PRIORITY")->value,uint32_t);
+    uint32_t max = JVM_TO_C_VALUE(classlinker_find_staticfield(frame,frame->method->class,"MAX_PRIORITY")->value,uint32_t);
+
+    FAIL_SET_JUMP(priority >= min && priority <= max,err,({
+        jvm_error_t errs = JVM_OK;
+        jvm_lock(frame->jvm);
+        objectmanager_object_t* exception = objectmanager_new_class_object(frame,classlinker_find_class(frame->jvm->linker, "java/lang/IllegalArgumentException"));
+        objectmanager_class_object_t* ecobject = objectmanager_get_class_object_info(exception);
+        if(!exception){
+            errs = JVM_OOM;
+            jvm_unlock(frame->jvm);
+        } else {
+            jvm_value_t init_args[1] = {0};
+            C_TO_JVM_VALUE(init_args[0],exception);
+
+            errs = jvm_invoke(frame->jvm,frame,objectmanager_class_object_get_method(frame,ecobject,"<init>", "()V"),1,init_args);
+            if(errs == JVM_OK){
+                errs = jvm_throw(frame,exception);
+            }
+            jvm_unlock(frame->jvm);
+        }
+        (errs);
+    }),exit);
+
+    TODO("Implement for POSIX");
+
+exit:
+    return err;
+}
+
+static jvm_error_t thread_getPriority(jvm_frame_t* frame){
+    objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
+    TODO("Implement properly on POSIX");
+    jvm_native_return(frame, classlinker_find_staticfield(frame,frame->method->class,"NORM_PRIORITY")->value);
+    return JVM_OK;
+}
+
 static jvm_error_t thread_isAlive(jvm_frame_t* frame){
     objectmanager_object_t* self = JVM_TO_C_VALUE(frame->locals[0],typeof(self));
     pthread_t thread = JVM_TO_C_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(self), "thread")->value,pthread_t);
@@ -210,7 +302,7 @@ static jvm_error_t thread_yield(jvm_frame_t* frame){
 }
 
 static classlinker_normalclass_t Thread_info = {
-    .fields_count = 2,
+    .fields_count = 3,
     .fields = (classlinker_field_t[]){
         {
             .name = "thread",
@@ -219,6 +311,11 @@ static classlinker_normalclass_t Thread_info = {
         },
         {
             .name = "target",
+            .value.type = EJVT_REFERENCE,
+            .flags = ACC_PRIVATE,
+        },
+        {
+            .name = "name",
             .value.type = EJVT_REFERENCE,
             .flags = ACC_PRIVATE,
         }
@@ -239,7 +336,7 @@ static classlinker_normalclass_t Thread_info = {
         },
     },
 
-    .methods_count = 12,
+    .methods_count = 19,
     .methods = (classlinker_method_t[]){
         {
             .name = "<clinit>",
@@ -261,10 +358,54 @@ static classlinker_normalclass_t Thread_info = {
             .fn = thread_init_target,
         },
         {
+            .name = "<init>",
+            .raw_description = "(Ljava/lang/Runnable;Ljava/lang/String)V",
+            .frame_descriptor.arguments_count = 2,
+            .flags = ACC_NATIVE,
+            .fn = thread_init_target_name,
+        },
+        {
+            .name = "<init>",
+            .raw_description = "(Ljava/lang/String)V",
+            .frame_descriptor.arguments_count = 1,
+            .flags = ACC_NATIVE,
+            .fn = thread_init_name,
+        },
+        {
+            .name = "getName",
+            .raw_description = "()Ljava/lang/String",
+            .flags = ACC_NATIVE,
+            .fn = thread_getName,
+        },
+        {
+            .name = "setPriority",
+            .raw_description = "()V",
+            .flags = ACC_NATIVE,
+            .fn = thread_setPriority,
+        },
+        {
+            .name = "getPriority",
+            .raw_description = "()I",
+            .flags = ACC_NATIVE,
+            .fn = thread_getPriority,
+        },
+        {
             .name = "os_stop",
             .raw_description = "()V",
             .flags = ACC_NATIVE,
             .fn = os_stop,
+        },
+        {
+            .name = "os_suspend",
+            .raw_description = "()V",
+            .flags = ACC_NATIVE,
+            .fn = os_suspend,
+        },
+        {
+            .name = "os_resume",
+            .raw_description = "()V",
+            .flags = ACC_NATIVE,
+            .fn = os_resume,
         },
         {
             .name = "start",

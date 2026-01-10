@@ -608,7 +608,7 @@ classlinker_error_t classlinker_link(classlinker_instance_t* linker, classloader
             class_info->methods_count = raw_class->methods_count;
 
             class_info->methods = arena_calloc(linker->arena,class_info->methods_count,sizeof(*class_info->methods));
-            FAIL_SET_JUMP(class_info->methods,err,CLASSLINKER_OOM,exit);
+            FAIL_SET_JUMP(class_info->methods || class_info->methods_count == 0 ,err,CLASSLINKER_OOM,exit);
 
             for(unsigned i = 0; i < class_info->methods_count; i++){
                 classloader_method_t* raw_method = &raw_class->methods[i];
@@ -780,9 +780,9 @@ bool classlinker_is_classes_compatible(classlinker_class_t* class, classlinker_c
 }
 
 void classlinker_class_synclock(classlinker_class_t* class){
-
+    mutex_lock(&class->synclock);
 }
 
 void classlinker_class_syncunlock(classlinker_class_t* class){
-    mutex_init(&class->synclock);
+    mutex_unlock(&class->synclock);
 }

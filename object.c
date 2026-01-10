@@ -235,8 +235,8 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     struct list_head copied_objects_list = LIST_HEAD_INIT(copied_objects_list);
     objectmanager_scan_classes(jvm,&used_objects_list);
 
-    jvm_thread_t* current_thread = NULL;
-    list_for_each_entry(current_thread,&jvm->threads, list){
+    jvm_thread_t* current_thread = NULL, *tmp_thread;
+    list_for_each_entry_safe(current_thread,tmp_thread,&jvm->threads, list){
         if(current_thread != jvm_current_thread){ //try to not stop gc itself)
 
             //Call function to freeze thread (implemented via java because it is OS dependant. Know how to implement it on Windows and FreeRTOS but not on posix)
@@ -257,9 +257,11 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
 
             //Add it to used list and scan what it contains
 
-            list_del_init(&current_thread->JThread->list); //Remove from main object list and add to used list
-            list_add(&current_thread->JThread->list,&used_objects_list);
-            objectmanager_scan_object(jvm,current_thread->JThread,&used_objects_list);
+            if(current_thread->JThread){
+                list_del_init(&current_thread->JThread->list); //Remove from main object list and add to used list
+                list_add(&current_thread->JThread->list,&used_objects_list);
+                objectmanager_scan_object(jvm,current_thread->JThread,&used_objects_list);
+            }
         }
 
 
@@ -289,8 +291,8 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     hashmap_init(&reverse_pointer_fix_table,hash_ptr,ptr_cmp);
 
 
-    objectmanager_object_t* finalize_cur = NULL;
-    list_for_each_entry(finalize_cur,&jvm->heap.object_list,list){
+    objectmanager_object_t* finalize_cur = NULL, *finalize_tmp;
+    list_for_each_entry_safe(finalize_cur,finalize_tmp,&jvm->heap.object_list,list){
         classlinker_method_t* finalize_method = objectmanager_class_object_get_method(&(jvm_frame_t){jvm}, objectmanager_get_class_object_info(finalize_cur), "finalize", "()V");
         if(finalize_method){
             jvm_value_t args[] = {{EJVT_REFERENCE}};
@@ -352,7 +354,7 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
         free(copy_to_put);
     }
 
-    list_for_each_entry(current_thread, &jvm->threads, list){
+    list_for_each_entry_safe(current_thread,tmp_thread, &jvm->threads, list){
         for(jvm_frame_t* cur = current_thread->topmost_frame; cur; cur = cur->previous_frame){
             current_thread->JThread = hashmap_get(&pointer_fix_table,current_thread->JThread);
 
@@ -434,7 +436,7 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     hashmap_cleanup(&pointer_fix_table);
     hashmap_cleanup(&reverse_pointer_fix_table);
 
-    list_for_each_entry(current_thread,&jvm->threads, list){
+    list_for_each_entry_safe(current_thread,tmp_thread,&jvm->threads, list){
         if(current_thread != jvm_current_thread){
 
             //Call function to unfreeze thread (implemented via java because it is OS dependant. Know how to implement it on Windows and FreeRTOS but not on posix)
@@ -599,17 +601,22 @@ classlinker_method_t* objectmanager_class_object_get_method(jvm_frame_t* frame, 
 }
 
 objectmanager_object_t* objectmanager_object_clone(jvm_frame_t* frame, objectmanager_object_t* object){
+    jvm_lock(frame->jvm);
     objectmanager_object_t* new_object = arena_alloc(frame->jvm->heap.gc_heap,object->size);
     if(new_object == NULL){
         objectmanager_gc(frame->jvm,object->size);
 
         new_object = arena_alloc(frame->jvm->heap.gc_heap,object->size);
-        if(new_object == NULL) return NULL;
+        if(new_object == NULL){
+            jvm_unlock(frame->jvm);
+            return NULL;
+        }
     }
     objectmanager_object_clone_into(object,&frame->jvm->heap.object_list,new_object);
     objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(new_object);
     cobject->monitor_id = EJOMMT_UNITIALISED;
 
+    jvm_unlock(frame->jvm);
     return new_object;
 }
 

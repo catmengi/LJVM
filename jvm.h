@@ -59,7 +59,6 @@ typedef struct jvm_frame_t{
 typedef struct{
     struct list_head list;
     jvm_instance_t* jvm;
-    void** bytecode_executor_arguments;
 
     jvm_frame_t* topmost_frame;
     objectmanager_object_t* JThread;
