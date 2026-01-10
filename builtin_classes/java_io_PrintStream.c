@@ -295,7 +295,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printbool,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
             {
             .name = "print",
@@ -303,7 +303,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printchar,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -311,7 +311,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printchararray,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -319,7 +319,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printdouble,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -327,7 +327,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printfloat,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -335,7 +335,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printint,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -343,7 +343,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printlong,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -351,7 +351,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printobject,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "print",
@@ -360,7 +360,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.arguments_count = 1,
             .frame_descriptor.stack_size = 1,
             .fn = printstream_printstring,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
 
 
@@ -369,7 +369,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .raw_description = "()V",
             .frame_descriptor.locals_count = 2,
             .fn = printstream_printlnvoid,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -377,7 +377,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
             {
             .name = "println",
@@ -385,7 +385,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -393,7 +393,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -401,7 +401,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -409,7 +409,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED ,
         },
         {
             .name = "println",
@@ -417,7 +417,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -425,7 +425,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -433,7 +433,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.arguments_count = 1,
             .fn = printstream_printlnobject,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
         {
             .name = "println",
@@ -442,7 +442,7 @@ classlinker_normalclass_t java_io_PrintStream_info = {
             .frame_descriptor.locals_count = 1,
             .frame_descriptor.stack_size = 1,
             .fn = printstream_println,
-            .flags = ACC_NATIVE,
+            .flags = ACC_NATIVE | ACC_SYNCHRONIZED,
         },
     }
 };

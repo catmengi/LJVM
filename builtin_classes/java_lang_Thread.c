@@ -33,10 +33,13 @@ static jvm_error_t thread_init(jvm_frame_t* frame){
 }
 
 static void posix_thread_cleanup(void* params){
-    jvm_instance_t* jvm = params;
+    jvm_instance_t* jvm = jvm_current_thread->jvm;
     jvm_lock(jvm);
 
     C_TO_JVM_VALUE(objectmanager_class_object_get_field(NULL, objectmanager_get_class_object_info(jvm_current_thread->JThread), "thread")->value,(pthread_t)NULL);
+
+    if(jvm_current_thread->bytecode_executor_arguments)
+        arena_free_block(jvm_current_thread->bytecode_executor_arguments);
 
     list_del(&jvm_current_thread->list);
     arena_free_block(jvm_current_thread);
@@ -70,9 +73,11 @@ static void* native_thread(void* params_p){
     new_thread->JThread = self;
     list_add(&new_thread->list,&jvm->threads);
 
+    new_thread->jvm = jvm;
+
     jvm_current_thread = new_thread;
     jvm->thread_count++;
-    pthread_cleanup_push(posix_thread_cleanup,jvm);
+    pthread_cleanup_push(posix_thread_cleanup,NULL);
     jvm_unlock(jvm);
 
     objectmanager_class_object_t* crunnable = objectmanager_get_class_object_info(runnable);

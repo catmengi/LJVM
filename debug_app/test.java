@@ -7,7 +7,7 @@ class thread implements Runnable{
 		msg = m;
 		duration = d;
 	}
-	public void run(){
+	synchronized public void run(){
 		for(int i = 0; i < duration; i++){
 			System.out.println(msg);
 		}

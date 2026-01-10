@@ -58,14 +58,33 @@ typedef struct jvm_frame_t{
 
 typedef struct{
     struct list_head list;
+    jvm_instance_t* jvm;
+    void** bytecode_executor_arguments;
+
     jvm_frame_t* topmost_frame;
     objectmanager_object_t* JThread;
 }jvm_thread_t;
+
+typedef struct{
+    mutex_t monitor;
+    condvar_t wait_notify; //Will be used for Object.wait Object.notify
+    bool used;
+
+    jvm_thread_t* last_user;
+}objectmanager_monitor_t;
+
+typedef struct{
+    size_t monitor_count;
+    objectmanager_monitor_t* monitors;
+}objectmanager_monitor_table_t;
 
 typedef struct{ //I hate C include system sometimes
     struct list_head object_list;
     Arena* gc_heap;
     uint32_t gc_heapsize;
+
+    mutex_t fallback_monitor;
+    objectmanager_monitor_table_t monitor_table;
 }objectmanager_heap_t;
 
 typedef struct jvm_instance_t{
@@ -77,7 +96,8 @@ typedef struct jvm_instance_t{
     atomic_uint thread_count;
     struct list_head threads;
 
-    pthread_mutex_t lock;
+    mutex_t lock;
+    mutex_t exit_lock;
     pthread_cond_t jvm_exit_wait;
 }jvm_instance_t;
 

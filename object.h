@@ -20,8 +20,13 @@ typedef struct objectmanager_object_t{
     bool gc_visited;
 }objectmanager_object_t;
 
+typedef enum{
+    EJOMMT_FALLBACK_GIL = -1,
+    EJOMMT_UNITIALISED = -2,
+}objectmanager_monitor_type_t;
+
 typedef struct{
-    mutex_t* synclock;
+    int monitor_id;
     classlinker_class_t* class;
     classlinker_field_t** fields; //2D field array, addressed via class generation
 }objectmanager_class_object_t;

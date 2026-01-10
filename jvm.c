@@ -261,20 +261,18 @@ static jvm_opcode_executor_t opcode_executors[211] = {
 
 };
 
-#define JVM_EXECUTOR_RESERVED_MEMORY 512 * 1024
+#define JVM_RESERVED_MEMORY 64 * 1024
 
 jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
-    Arena* arena = arena_new_dynamic(sizeof(jvm_instance_t*) + JVM_EXECUTOR_RESERVED_MEMORY);
+    Arena* arena = arena_new_dynamic(sizeof(jvm_instance_t*) + JVM_RESERVED_MEMORY);
     jvm_instance_t* instance = arena_alloc(arena,sizeof(*instance));
     assert(instance);
 
     instance->arena = arena;
     instance->linker = linker;
 
-    pthread_mutexattr_t lockattr;
-    pthread_mutexattr_init(&lockattr);
-    pthread_mutexattr_settype(&lockattr,PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&instance->lock,&lockattr);
+    mutex_init(&instance->lock);
+    mutex_init(&instance->exit_lock);
 
     assert(objectmanager_init_heap(instance,heap_size) == JVM_OK);
 
@@ -293,22 +291,33 @@ jvm_instance_t* jvm_new(classlinker_instance_t* linker, uint32_t heap_size){
 }
 
 void jvm_lock(jvm_instance_t* jvm){
-    pthread_mutex_lock(&jvm->lock);
+    mutex_lock(&jvm->lock);
 }
 void jvm_unlock(jvm_instance_t* jvm){
-    pthread_mutex_unlock(&jvm->lock);
+    mutex_unlock(&jvm->lock);
 }
 
 jvm_error_t jvm_bytecode_executor(jvm_frame_t* frame){
     jvm_error_t err = JVM_OK;
     classlinker_bytecode_t* bytecode = frame->method->userctx;
 
-    void** arguments = arena_alloc(frame->jvm->arena,OPCODE_MAX_ARGUMENTS * sizeof(void*)); // TODO: allocate arguments once per thread!!!!!
-    FAIL_SET_JUMP(arguments,err,JVM_OOM,exit);
+    void** arguments = jvm_current_thread ? jvm_current_thread->bytecode_executor_arguments : NULL;
+    if(arguments == NULL){
+        if(jvm_current_thread == NULL){
+            arguments = alloca(OPCODE_MAX_ARGUMENTS * sizeof(void*));
+            for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
+                arguments[i] = alloca(sizeof(uint64_t));
+            }
+        } else {
+            jvm_current_thread->bytecode_executor_arguments = arena_alloc(frame->jvm->arena,OPCODE_MAX_ARGUMENTS * sizeof(void*));
+            FAIL_SET_JUMP(jvm_current_thread->bytecode_executor_arguments,err,JVM_OOM,exit);
 
-    for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
-        arguments[i] = arena_alloc(frame->jvm->arena,sizeof(uint64_t));
-        FAIL_SET_JUMP(arguments[i],err,JVM_OOM,exit);
+            arguments = jvm_current_thread->bytecode_executor_arguments;
+            for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
+                arguments[i] = arena_alloc(frame->jvm->arena,sizeof(uint64_t));
+                FAIL_SET_JUMP(arguments[i],err,JVM_OOM,exit);
+            }
+        }
     }
 
     for(;frame->pc < bytecode->code_length; frame->pc++){
@@ -353,11 +362,6 @@ jvm_error_t jvm_bytecode_executor(jvm_frame_t* frame){
     }
 
 exit:
-    for(unsigned i = 0; i < OPCODE_MAX_ARGUMENTS; i++){
-        arena_free_block(arguments[i]);
-    }
-    arena_free_block(arguments);
-    
     return err;
 }
 
@@ -391,7 +395,7 @@ jvm_error_t jvm_invoke(jvm_instance_t* instance, jvm_frame_t* previous_frame, cl
     //Object/class lock section
     if((callable_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED){
         (callable_method->flags & ACC_STATIC) == ACC_STATIC ? 
-                    classlinker_class_syncunlock(callable_method->class) : objectmanager_object_syncunlock(*(void**)frame.locals[0].value);
+                    classlinker_class_synclock(callable_method->class) : objectmanager_object_synclock(*(void**)frame.locals[0].value);
     }
 
     jvm_error_t method_err = callable_method->fn(&frame);
@@ -520,8 +524,7 @@ exit:
 
 void jvm_wait_exit(jvm_instance_t* instance){
     if(instance){
-        pthread_mutex_t dummy = PTHREAD_MUTEX_INITIALIZER;
-        pthread_cond_wait(&instance->jvm_exit_wait,&dummy);
-        pthread_mutex_destroy(&dummy);
+        mutex_lock(&instance->exit_lock);
+        pthread_cond_wait(&instance->jvm_exit_wait,&instance->exit_lock);
     }
 }

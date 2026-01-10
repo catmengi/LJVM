@@ -11,6 +11,8 @@
 
 #include <pthread.h>
 
+#define MONITOR_TABLE_SIZE 128
+
 static objectmanager_object_t* array_JLObject = NULL;
 
 static uint32_t nextby(uint32_t value, uint32_t by){
@@ -32,7 +34,33 @@ jvm_error_t objectmanager_init_heap(jvm_instance_t* jvm, uint32_t heap_size){
     array_JLObject = objectmanager_new_class_object(&(jvm_frame_t){jvm},classlinker_find_class(jvm->linker,"java/lang/Object"));
     assert(array_JLObject);
 
+    jvm->heap.monitor_table.monitor_count = MONITOR_TABLE_SIZE;
+    jvm->heap.monitor_table.monitors = arena_calloc(jvm->arena,jvm->heap.monitor_table.monitor_count,sizeof(*jvm->heap.monitor_table.monitors));
+    assert(jvm->heap.monitor_table.monitors);
+
+    for(unsigned i = 0; i < jvm->heap.monitor_table.monitor_count; i++){
+        mutex_init(&jvm->heap.monitor_table.monitors[i].monitor);
+        jvm->heap.monitor_table.monitors[i].used = false;
+    }
+
     return JVM_OK;
+}
+
+static int allocate_monitor(jvm_instance_t* jvm){
+    int found = EJOMMT_FALLBACK_GIL; //Use fallback GIL
+
+    jvm_lock(jvm);
+    for(unsigned i = 0; i < jvm->heap.monitor_table.monitor_count; i++){
+        if(jvm->heap.monitor_table.monitors[i].used == false){
+            jvm->heap.monitor_table.monitors[i].used = true;
+            jvm->heap.monitor_table.monitors[i].last_user = NULL;
+            found = i;
+            break;
+        }
+    }
+    jvm_unlock(jvm);
+
+    return found;
 }
 
 void objectmanager_object_clone_into(objectmanager_object_t* object, struct list_head* object_list, void* memory){
@@ -285,12 +313,13 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
                 .stack.stack = stack,
             };
             INIT_LIST_HEAD(&finalize_frame.previous_frame->native_exceptions);
-
             finalize_method->fn(&finalize_frame);
+
+            objectmanager_class_object_t* ccur = objectmanager_get_class_object_info(finalize_cur);
+            if(ccur->monitor_id >= 0){
+                jvm->heap.monitor_table.monitors[ccur->monitor_id].used = false; //Free mutex
+            }
         }
-        //I hope that it is already safe too delete this mutex
-        mutex_destroy(objectmanager_get_class_object_info(finalize_cur)->synclock);
-        arena_free_block(objectmanager_get_class_object_info(finalize_cur)->synclock); 
     }
 
     objectmanager_object_t* used_object = NULL; //Copy used objects
@@ -303,8 +332,6 @@ void objectmanager_gc(jvm_instance_t* jvm, unsigned required_memory){
     }
     INIT_LIST_HEAD(&jvm->heap.object_list);
     arena_reset_zero(jvm->heap.gc_heap); //Now reset heap to 0
-
-
 
     objectmanager_object_t* copy_to_put = NULL;
     objectmanager_object_t* copy_to_put_tmp = NULL;
@@ -470,11 +497,7 @@ objectmanager_object_t* objectmanager_new_class_object(jvm_frame_t* frame,
 
     cobject->class = class;
     cobject->fields = cobject_fields_memory;
-    cobject->synclock = arena_alloc(frame->jvm->arena,sizeof(mutex_t)); //we should allocate from unmovable heap
-    if(cobject->synclock == NULL){
-        new_object = NULL; //OOM
-        goto exit;
-    } else mutex_init(cobject->synclock);
+    cobject->monitor_id = EJOMMT_UNITIALISED;
 
     void* cur_fields_mem = cobject_fields_content_memory;
     for(classlinker_class_t* cur_class = cobject->class; cur_class; cur_class = cur_class->parent){
@@ -584,15 +607,36 @@ objectmanager_object_t* objectmanager_object_clone(jvm_frame_t* frame, objectman
         if(new_object == NULL) return NULL;
     }
     objectmanager_object_clone_into(object,&frame->jvm->heap.object_list,new_object);
+    objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(new_object);
+    cobject->monitor_id = EJOMMT_UNITIALISED;
 
     return new_object;
 }
 
 void objectmanager_object_synclock(objectmanager_object_t* object){
-    mutex_lock(objectmanager_get_class_object_info(object)->synclock);
+    objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(object);
+    if(cobject){
+        if(cobject->monitor_id == EJOMMT_UNITIALISED)
+            cobject->monitor_id = allocate_monitor(jvm_current_thread->jvm);
+
+        mutex_t* lock = cobject->monitor_id == -1 ? &jvm_current_thread->jvm->heap.fallback_monitor :
+                                                    &jvm_current_thread->jvm->heap.monitor_table.monitors[cobject->monitor_id].monitor;
+
+        jvm_current_thread->jvm->heap.monitor_table.monitors[cobject->monitor_id].last_user = jvm_current_thread;
+        mutex_lock(lock);
+    }
 }
 void objectmanager_object_syncunlock(objectmanager_object_t* object){
-    mutex_unlock(objectmanager_get_class_object_info(object)->synclock);  
+    objectmanager_class_object_t* cobject = objectmanager_get_class_object_info(object);
+    if(cobject){
+        if(cobject->monitor_id == EJOMMT_UNITIALISED)
+            cobject->monitor_id = allocate_monitor(jvm_current_thread->jvm);
+
+        mutex_t* lock = cobject->monitor_id == -1 ? &jvm_current_thread->jvm->heap.fallback_monitor :
+                                                    &jvm_current_thread->jvm->heap.monitor_table.monitors[cobject->monitor_id].monitor;
+
+        mutex_unlock(lock);
+    }
 }
 
 static uint32_t h31_hash(const char* s, size_t len)
