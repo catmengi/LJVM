@@ -1,7 +1,8 @@
 class some_random_shit{
     static final int a = 13912;
     static float c = (float)999.23;
-
+    
+    Object ptr = null;
     int b = 24;
     int hl;
 };

@@ -38,7 +38,7 @@ int linker_init(linker_t* linker, classloader_instance_t* loader){
     return 1;
 }
 
-JClass_t* linker_find(linker_t* linker, char* name){
+JClass_t* class_find(linker_t* linker, char* name){
     JClass_t* cur = NULL;
     list_for_each_entry(cur,&linker->classes,list){
         if(strcmp(cur->name, name) == 0){
@@ -70,7 +70,7 @@ unsigned linker_load_builtins(linker_t* linker){
 
     JClass_t* cur = NULL;
     list_for_each_entry(cur,&linker->classes,list){
-        cur->parent = cur->parent ? linker_find(linker,cur->parent->name) : NULL;
+        cur->parent = cur->parent ? class_find(linker,cur->parent->name) : NULL;
         if(cur->parent) cur->parent->flags.top_level = 0;
     }
 
@@ -150,6 +150,52 @@ static inline int get_argument_count_from_descriptor(const char* descriptor){
     return arg_count;
 }
 
+void parse_args_to_array(const char* descriptor, JValue_type_t* args_array, unsigned arg_count) {
+    // 1. Validate inputs. If nothing to do or inputs are invalid, return immediately.
+    if (!descriptor || !args_array || arg_count == 0 || descriptor[0] != '(') {
+        return;
+    }
+
+    // 2. Start a single pass to fill the array.
+    const char* p = descriptor + 1; // Start scanning after the opening '('
+
+    for (unsigned i = 0; i < arg_count; ++i) {
+        // Safety check: break if the descriptor ends unexpectedly.
+        if (*p == '\0' || *p == ')') {
+            break;
+        }
+
+        char current_type_char = *p;
+
+        // Assign the type directly, as the enum values match the characters.
+        if (current_type_char == 'L' || current_type_char == '[') {
+            args_array[i] = EJVT_REFERENCE;
+        } else {
+            args_array[i] = (JValue_type_t)current_type_char;
+        }
+
+        // Advance the pointer 'p' to the beginning of the next argument descriptor.
+        if (current_type_char == 'L') {
+            // It's an object reference, e.g., "Ljava/lang/String;". Skip to the semicolon.
+            while (*p != '\0' && *p != ';') {
+                p++;
+            }
+        } else if (current_type_char == '[') {
+            // It's an array. Skip all leading '[' characters.
+            while (*p == '[') {
+                p++;
+            }
+            // If it's an array of objects (e.g., "[L...;"), skip the class name too.
+            if (*p == 'L') {
+                while (*p != '\0' && *p != ';') {
+                    p++;
+                }
+            }
+        }
+        p++; // Move past the primitive character (e.g., 'I') or the semicolon.
+    }
+}
+
 JError_t linker_link(linker_t* linker){
     JError_t err = EJERR_OK;
     unsigned builtins_count = linker_load_builtins(linker); //This function should copy builtin classes into our linker
@@ -208,7 +254,7 @@ JError_t linker_link(linker_t* linker){
         if(cur_inlink->parent == NULL && cur_inlink->flags.non_builtin == 1){
             FAIL_SET_JUMP(metadata,err,EJERR_INVALID_CLASS,exit);
 
-            cur_inlink->parent = linker_find(linker,metadata->parent_name);
+            cur_inlink->parent = class_find(linker,metadata->parent_name);
             FAIL_SET_JUMP(cur_inlink->parent,err,({
                 printf("%s: cannot found class '%s' of '%s'\n",__PRETTY_FUNCTION__,metadata->parent_name,cur_inlink->name);
                 (EJERR_NOT_FOUND);
@@ -251,7 +297,7 @@ JError_t linker_link(linker_t* linker){
                         char* class_name = raw_class->constants[constant_class->name_index].data;
 
                         if(class_name[0] != '['){
-                            JClass_t* found = linker_find(linker,class_name);
+                            JClass_t* found = class_find(linker,class_name);
                             parsed_constant->value = found;
                         } else {
                             JClass_t* array_class = bumper_calloc(&linker->arena,1,sizeof(*array_class));
@@ -263,7 +309,7 @@ JError_t linker_link(linker_t* linker){
                             array_class->name = bumper_strdup(&linker->arena,class_name);
                             FAIL_SET_JUMP(array_class->name,err,EJERR_OOM,exit);
 
-                            array_class->parent = linker_find(linker,"java/lang/Object");
+                            array_class->parent = class_find(linker,"java/lang/Object");
                             parsed_constant->value = array_class;
                         }
                     }
@@ -446,10 +492,17 @@ JError_t linker_link(linker_t* linker){
                 sprintf(mangled_name,"%s@%s",name,description);
                 new_method->mangled_name = mangled_name;
 
+                char* return_type = strchr(description,')') + 1;
+                new_method->return_type = *return_type == '[' ? 'L' : *return_type;
+
                 int argument_count = 0;
                 FAIL_SET_JUMP((argument_count = get_argument_count_from_descriptor(description)) >= 0,err,EJERR_INVALID_CLASS,exit);
 
-                argument_count += !new_method->flags.is_static; //Add this
+                new_method->frame_info.argument_types = bumper_calloc(&linker->arena,argument_count,sizeof(JValue_type_t));
+                FAIL_SET_JUMP(new_method->frame_info.argument_types, err, EJERR_OOM,exit);
+
+                parse_args_to_array(description, new_method->frame_info.argument_types, argument_count);
+                new_method->frame_info.arguments_count = argument_count;
 
                 for(unsigned attr = 0; attr < raw_method->attributes_count; attr++){
                     classloader_attribute_t* attr_info = &raw_method->attributes[attr];
@@ -528,7 +581,7 @@ JError_t linker_link(linker_t* linker){
                         classloader_constant_class_t* class = raw_class->constants[ref->class_index].data;
                         char* class_name = raw_class->constants[class->name_index].data;
 
-                        JClass_t* ref_class = linker_find(linker, class_name);
+                        JClass_t* ref_class = class_find(linker, class_name);
                         FAIL_SET_JUMP(ref_class,err,EJERR_NOT_FOUND,exit);
 
                         classloader_constant_name_and_type_t* nameandtype = raw_class->constants[ref->name_and_type_index].data;
@@ -581,7 +634,7 @@ exit:
     return err;
 }
 
-JField_t* linker_find_field(JClass_t* class, char* name, bool is_static){
+JField_t* class_find_field(JClass_t* class, char* name, bool is_static){
     JField_t* ret = NULL;
 
     for(JClass_t* cur = class; cur; cur = cur->parent){
@@ -595,11 +648,11 @@ JField_t* linker_find_field(JClass_t* class, char* name, bool is_static){
     return ret;
 }
 
-void* linker_get_staticfield(JField_t* field){ //TODO: check if field really static
+void* class_get_staticfield(JField_t* field){ //TODO: check if field really static
     return field ? &field->owner->info->static_fields[field->offset] : NULL;
 }
 
-JMethod_t* linker_find_method(JClass_t* class, char* mangled_name, bool is_static){
+JMethod_t* class_find_method(JClass_t* class, char* mangled_name, bool is_static){
     for(JClass_t* cur = class; cur; cur = cur->parent){
         if(cur->info && cur->info->methods){
             JMethod_t* method = fht_get(cur->info->methods,mangled_name);
@@ -611,7 +664,7 @@ JMethod_t* linker_find_method(JClass_t* class, char* mangled_name, bool is_stati
     return NULL;
 }
 
-bool linker_is_classes_compatible(JClass_t* class, JClass_t* compatible_to){
+bool is_classes_compatible(JClass_t* class, JClass_t* compatible_to){
     for(JClass_t* cur = class; cur; cur = cur->parent){
         if(compatible_to == cur)
             return true;
@@ -620,7 +673,7 @@ bool linker_is_classes_compatible(JClass_t* class, JClass_t* compatible_to){
             if(cur->implements.implement[i] == cur || cur->implements.implement[i] == class)
                 continue;
             
-            if(linker_is_classes_compatible(cur->implements.implement[i], compatible_to))
+            if(is_classes_compatible(cur->implements.implement[i], compatible_to))
                 return true;
         }
     }

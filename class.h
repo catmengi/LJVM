@@ -111,6 +111,7 @@ typedef int JError_t;
 typedef JError_t (*JMethod_fn_t)();
 typedef struct JMethod_t{
     char* mangled_name; //name@description
+    JValue_type_t return_type; //Required for proper invokation(selects which function will push retval to previous frame's stack)
     JClass_t* owner;
 
     union{
@@ -125,8 +126,11 @@ typedef struct JMethod_t{
 
     struct{
         unsigned locals_count;
-        unsigned arguments_count;
         unsigned stack_size;
+
+        unsigned arguments_count;
+        JValue_type_t* argument_types;
+        
     }frame_info;
 
     JMethod_fn_t method;

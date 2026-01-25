@@ -22,7 +22,7 @@ typedef struct JHandle_frame_t{
 
 typedef struct JFrame_t{
     JFrame_t* prev;
-    JHandle_frame_t* handle_frame; //Can also be scanned by GC, used only by NATIVE code
+    //JHandle_frame_t* handle_frame; //Can also be scanned by GC, used only by NATIVE code
     JMethod_t* method;
     size_t frame_size;
 
@@ -47,6 +47,8 @@ typedef struct JThread_state_t{
 typedef struct JThread_t JThread_t;
 typedef struct JThread_t{
     struct list_head list;
+    JError_t local_errno;
+    
     mutex_t thread_lock;
 
     JFrame_t* top_frame;
@@ -70,20 +72,27 @@ typedef JError_t (*JMethod_fn_t)(); //This is the main method type of JVM. If re
 
 JThread_t* thread_init(JVM_t* jvm);
 JFrame_t* thread_method_frame_push(JMethod_t* method);
-JError_t thread_method_return(void* value, JValue_type_t type);
-
-void thread_frame_stack_push(void* value, JValue_type_t type); //same but automaticly assumes that we want to push in current thread
-void thread_frame_stack_pop(void* value, JValue_type_t type);
-
-void thread_frame_stack_push_raw(void* value, uint8_t size); //same but automaticly assumes that we want to push in current thread
-void thread_frame_stack_pop_raw(void* value, uint8_t size);
+JFrame_t* thread_method_frame_pop();
 
 JFrame_t* thread_frame_get();
 
-JError_t frame_method_return(JFrame_t* frame, void* value, JValue_type_t type);
+//u32 is for uint32_t based values (everything except double and long), u64 is double and long basically
+void thread_frame_stack_push_u32(void* value);
+void thread_frame_stack_pop_u32(void* output);
+void thread_frame_stack_push_u64(void* value);
+void thread_frame_stack_pop_u64(void* output);
 
-void frame_stack_push(JFrame_t* frame, void* value, JValue_type_t type);
-void frame_stack_pop(JFrame_t* frame, void* value, JValue_type_t type);
+void thread_frame_local_set_u32(unsigned index, void* value);
+void thread_frame_local_set_u64(unsigned index, void* value);
+void thread_frame_local_get_u32(unsigned index, void* output);
+void thread_frame_local_get_u64(unsigned index, void* output);
 
-void frame_stack_push_raw(JFrame_t* frame, void* value, uint8_t size);
-void frame_stack_pop_raw(JFrame_t* frame, void* value, uint8_t size);
+//USE ONLY THOOSE FOR POINTERS! THEY WILL AUTOMATICLY PERFORM POINTER COMPRESSION/DECOMPRESSION BASED ON ARCH
+void thread_frame_stack_push_reference(void* value);
+void thread_frame_stack_pop_reference(void* output);
+void thread_frame_local_get_reference(unsigned index, void* output);
+void thread_frame_local_set_reference(unsigned index, void* value);
+//============================================================================================================
+
+JError_t frame_method_return(JFrame_t* frame, void* value);
+JError_t thread_method_return(void* value); //Return type will be automaticly fetched from method info

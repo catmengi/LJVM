@@ -15,10 +15,10 @@ typedef struct linker_t{
 }linker_t;
 
 int linker_init(linker_t* linker, classloader_instance_t* loader);
-JClass_t* linker_find(linker_t* linker, char* name);
+JClass_t* class_find(linker_t* linker, char* name);
 JError_t linker_link(linker_t* linker);
 
-JField_t* linker_find_field(JClass_t* class, char* name, bool is_static);
-void* linker_get_staticfield(JField_t* field);
-JMethod_t* linker_find_method(JClass_t* class, char* mangled_name, bool is_static); //mangledd_name is name+description string in this format: name@description
-bool linker_is_classes_compatible(JClass_t* class, JClass_t* compatible_to);
+JField_t* class_find_field(JClass_t* class, char* name, bool is_static);
+void* class_get_staticfield(JField_t* field);
+JMethod_t* class_find_method(JClass_t* class, char* mangled_name, bool is_static); //mangledd_name is name+description string in this format: name@description
+bool is_classes_compatible(JClass_t* class, JClass_t* compatible_to);

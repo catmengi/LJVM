@@ -11,7 +11,12 @@ enum{
     EJERR_NOT_FOUND,
     EJERR_INVALID_CLASS,
     EJERR_INVALID_FRAME_STATE,
-    EJERR_ARITHMETIC
+    EJERR_ARITHMETIC,
+    EJERR_OUTOFBOUNDS,
+    EJERR_NULLPTR,
+    EJERR_WRONG_OBJECT_TYPE, //In this case type is array or class object
+    EJERR_INVALID_ARGUMENT,
+    EJERR_TYPE_MISMATCH,
 };
 
 typedef struct JHeap_t JHeap_t;
@@ -21,4 +26,4 @@ typedef struct JVM_t{
     linker_t* linker;
 }JVM_t;
 
-JError_t jvm_init(JVM_t* jvm);
+JError_t jvm_init(JVM_t* jvm, linker_t* linker);
