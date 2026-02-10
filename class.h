@@ -22,7 +22,8 @@ typedef struct{
 typedef struct{
     JClass_t* should_implement;
     char* name;
-}JInterfaceMethodRef_t;
+}JInterfaceMethodRef_t; //I think i would implement default methods in my JVM.... But i dont think someone
+                        //will be able to use them
 
 typedef struct{
     char* name; //This name is not java's raw name, it is name@description
@@ -32,6 +33,7 @@ typedef struct{
         uint32_t flags;
         struct{
             bool is_static:1;
+            bool is_alligned:1; //I think this would be used in future to decide should we enter or not critical section
             bool is_unitialised:1; //This flags will be only set if: field is static, field have constantValue attribute
                                    //If this flags set, getstatic should initialise memory leading to this field with value from constvalue
                                    //Based on fields type
@@ -79,6 +81,7 @@ typedef struct{
     JField_t** fields;
 }JFieldTable_t;
 
+typedef struct JLinker_t JLinker_t;
 typedef struct JClass_t{
     struct list_head list; //Used to store class in class_list of linker.
     struct list_head as_child; //Used to store class in child_list of parent. 
@@ -86,6 +89,7 @@ typedef struct JClass_t{
 
     char* name;
     JClass_t* parent;
+    JLinker_t* linker;
 
     union{
         uint32_t flags;
@@ -104,8 +108,8 @@ typedef struct JClass_t{
         void** constants;
     }constantpool;
 
-    JMethodTable_t vtable;
-    JFieldTable_t fields[2]; //0: instance fields, 1: static fields
+    JMethodTable_t vtable; //Vtable for instance methods
+    JFieldTable_t fields[2]; //0: instance fields, 1: static fields. Will be used for GC scanning
     size_t ifields_size; //Ammount of memory required for ifields of this object
 
     void* metadata;

@@ -4,7 +4,7 @@
 #include "bumper.h"
 #include "hashmap.h"
 
-typedef struct{
+typedef struct JLinker_t{
     bump_allocator_t* arena;
     JLoader_t* loader;
 
@@ -20,7 +20,9 @@ typedef struct{
 typedef struct{
     JRawClass_t* raw_self;
     hashmap_t fields;
-    hashmap_t all_methods; //It have ALL references to methods
+
+    hashmap_t methods; //It have ALL references to methods
+    size_t methods_count[2]; //counter of all methods in class. 0 - instance methods, 1 - staticly linked
 
     size_t ifield_curoffset; //This is the current offset for instance fields. 
                              //It will be use like this: field->offset = ifield_curoffset; ifield_curoffset += (field size);
@@ -31,7 +33,7 @@ typedef struct{
 
 typedef struct{
     char* mangled_name; //name@description
-    void* fn; //TODO: change to proper function ptr
+    void* fn; //TODO: change to proper function ptr. Or dont if i will use libffi in future
 }JENIMethod_t;
 
 typedef struct{
@@ -43,3 +45,6 @@ typedef struct{
 
 int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena);
 JError_t JLinker_link(JLinker_t* linker);
+JClass_t* JClass_get(JLinker_t* linker, char* class_name);
+JMethod_t* JClass_get_method(JClass_t* class, char* method_name);
+JField_t* JClass_get_field(JClass_t* class, char* field_name);

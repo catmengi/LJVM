@@ -23,9 +23,27 @@ int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
 }
 
 static size_t value_sizeof(JValueType_t type){
-    if(type == EJVT_DOUBLE || type == EJVT_LONG)
-        return sizeof(uint64_t);
-    else return sizeof(uint32_t);
+    switch(type){
+        case EJVT_REFERENCE:
+        case EJVT_INT:
+        case EJVT_FLOAT:
+            return sizeof(uint32_t);
+        
+        case EJVT_LONG:
+        case EJVT_DOUBLE:
+            return sizeof(uint64_t);
+
+        case EJVT_BOOL:
+        case EJVT_BYTE:
+            return sizeof(uint8_t);
+
+        case EJVT_SHORT:
+        case EJVT_CHAR:
+            return sizeof(uint16_t);
+        
+        case EJVT_VOID:
+            return 0;
+    }
 }
 
 //This method will create class, lookup its name and add it to the linker hashtable
@@ -70,7 +88,7 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     metadata->raw_self = raw_class;
 
     FAIL_SET_JUMP(hashmap_init(&metadata->fields,8,linker_ht_arena_alloc,linker->arena) == 0,ret_val,NULL,exit);
-    FAIL_SET_JUMP(hashmap_init(&metadata->all_methods,8,linker_ht_arena_alloc,linker->arena) == 0,ret_val,NULL,exit);
+    FAIL_SET_JUMP(hashmap_init(&metadata->methods,8,linker_ht_arena_alloc,linker->arena) == 0,ret_val,NULL,exit);
     class->metadata = metadata;
 
     FAIL_SET_JUMP(hashmap_set(&linker->class_map,class->name, class) == 0,ret_val,NULL,exit);
@@ -79,18 +97,6 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
 
 exit:
     return ret_val;
-}
-
-
-static JMethodRef_t* lookup_vtable(JClass_t* class, char* mangled_name){
-    for(JClass_t* cur = class; cur; cur = cur->parent){
-        JLinkerMetadata_t* metadata = cur->metadata;
-        JMethod_t* is_found = hashmap_get(&metadata->all_methods,mangled_name);
-        if(is_found && is_found->methodref)
-            return is_found->methodref;
-    }
-
-    return NULL;
 }
 
 static JError_t parse_method_prototype(JMethod_t* method, const char* descriptor, bump_allocator_t* arena) {
@@ -167,52 +173,6 @@ static JError_t parse_method_prototype(JMethod_t* method, const char* descriptor
     return JERR_OK;
 }
 
-static unsigned methodtable_originals_count(JMethodTable_t* new_methods, JMethodTable_t* parent_vtable) {
-    if (!parent_vtable || parent_vtable->count == 0) {
-        // If there's no parent, count all non-statically-linked methods.
-        unsigned count = 0;
-        for (unsigned i = 0; i < new_methods->count; ++i) {
-            if (new_methods->methods[i] && !new_methods->methods[i]->flags.is_staticlinked) {
-                count++;
-            }
-        }
-        return count;
-    }
-    
-    if (new_methods->count == 0) {
-        return 0;
-    }
-
-    unsigned originals_count = 0;
-
-    for (unsigned i = 0; i < new_methods->count; ++i) {
-        JMethod_t* new_method = new_methods->methods[i];
-
-        if (!new_method || !new_method->name || new_method->flags.is_staticlinked) {
-            continue;
-        }
-
-        bool found_in_parent = false;
-
-        for (unsigned j = 0; j < parent_vtable->count; ++j) {
-            JMethod_t* parent_method = parent_vtable->methods[j];
-            if (!parent_method || !parent_method->name) {
-                continue;
-            }
-
-            if (strcmp(new_method->name, parent_method->name) == 0) {
-                found_in_parent = true;
-                break;
-            }
-        }
-
-        if (!found_in_parent) {
-            originals_count++;
-        }
-    }
-
-    return originals_count;
-}
 
 //Recursive shit
 static JError_t build_class(JLinker_t* linker, JClass_t* class){
@@ -250,8 +210,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         field->name = mangled_fname;
         field->type = *fdescription;
 
-        field->flags.is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC;
-        if(is_interface) assert(field->flags.is_static);
+        field->flags.is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC || is_interface;
 
         class->fields[field->flags.is_static].count++;
 
@@ -276,6 +235,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             field->offset = metadata->ifield_curoffset;
             metadata->ifield_curoffset += value_sizeof(field->type);
         }
+        field->flags.is_alligned = (field->offset % sizeof(uint32_t) == 0) && (field->type != EJVT_DOUBLE && field->type != EJVT_LONG);
         field->owner = class;
 
         FAIL_SET_JUMP(hashmap_set(&metadata->fields, field->name, field) == 0, err, JERR_UNKNOWN, exit);
@@ -296,15 +256,6 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
     }
 
     //Generate methods
-    class->vtable.count = description->methods_count + (class->parent ? class->parent->vtable.count : 0);
-    class->vtable.methods = bumper_calloc(linker->arena,class->vtable.count, sizeof(*class->vtable.methods));
-    unsigned cur_vtable_start = class->parent ? class->parent->vtable.count : 0;
-    if(class->parent){
-        for(unsigned i = 0; i < class->parent->vtable.count; i++){
-            class->vtable.methods[i] = class->parent->vtable.methods[i];
-        }
-    }
-
     for(unsigned i = 0; i < description->methods_count; i++){
         JRawMethod_t* raw_method = &description->methods[i];
         JMethod_t* method = bumper_calloc(linker->arena,1,sizeof(*method));
@@ -331,20 +282,25 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
         method->flags.is_static = (raw_method->flags & ACC_STATIC) == ACC_STATIC;
         method->flags.is_final = (raw_method->flags & ACC_FINAL) == ACC_FINAL;
-        method->flags.is_staticlinked = method->flags.is_static || ((raw_method->flags & ACC_PRIVATE) == ACC_PRIVATE) || (strcmp(name, "<init>") == 0);
+        method->flags.is_staticlinked = method->flags.is_static || ((raw_method->flags & ACC_PRIVATE) == ACC_PRIVATE) 
+                                        || (strcmp(name, "<init>") == 0) || (strcmp(name, "<clinit>") == 0);
         method->flags.is_frominterface = is_interface;
         method->flags.is_set = 0;
 
-        if(!is_interface || (is_interface && method->flags.is_static)){
-            if(!method->flags.is_native){
+        if(!method->flags.is_native){
                 //TODO("PARSE CODE ATTRIBUTE!!!!!");
-            } else {
-                //TODO("NATIVE METHOD LOOKUP");
+        } else {
+            JRawAttribute_t* current_attribute = NULL; //Using raw code attribute because we can directly use it (via our constant pool)
+            list_for_each_entry(current_attribute,&raw_method->attributes,list){
+                if(current_attribute->type == EJAT_CODE){
+                    method->method_info = current_attribute->info;
+                    break;
+                }
             }
         }
 
-            
-        FAIL_SET_JUMP(hashmap_set(&metadata->all_methods,method->name,method) == 0,err,JERR_UNKNOWN,exit);
+        metadata->methods_count[method->flags.is_staticlinked]++;
+        FAIL_SET_JUMP(hashmap_set(&metadata->methods,method->name,method) == 0,err,JERR_UNKNOWN,exit);
     }
 
     if(!is_interface){ //No reason to build vtable if this is an interface
@@ -352,14 +308,14 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         unsigned redefines_count = 0;
         for(unsigned i = 0; i < (class->parent ? class->parent->vtable.count : 0); i++){
-            JMethod_t* redefine_with = hashmap_get(&metadata->all_methods,class->parent->vtable.methods[i]->name);
+            JMethod_t* redefine_with = hashmap_get(&metadata->methods,class->parent->vtable.methods[i]->name);
             if(redefine_with && !redefine_with->flags.is_staticlinked)
                 redefines_count++;
         }
 
         JMethodTable_t* new_vtable = &class->vtable;
         new_vtable->count = (class->parent ? class->parent->vtable.count : 0) 
-                            + (description->methods_count - redefines_count); 
+                            + (metadata->methods_count[0] - redefines_count); 
         new_vtable->methods = bumper_calloc(linker->arena,new_vtable->count,sizeof(*new_vtable->methods));
         FAIL_SET_JUMP(new_vtable->methods,err,JERR_OOM,exit);
 
@@ -371,7 +327,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             JMethod_t* method = new_vtable->methods[i];
             assert(!method->flags.is_staticlinked);
 
-            JMethod_t* override_with = hashmap_get(&metadata->all_methods,method->name);
+            JMethod_t* override_with = hashmap_get(&metadata->methods,method->name);
             if(override_with){
                 FAIL_SET_JUMP(!method->flags.is_final,err,JERR_BADPARAM,exit);
                 new_vtable->methods[i] = override_with;
@@ -381,7 +337,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         unsigned vtable_index = (class->parent ? class->parent->vtable.count : 0);
         hashmap_iterator_t method_iter = {0};
-        hashmap_iterator_init(&metadata->all_methods, &method_iter);
+        hashmap_iterator_init(&metadata->methods, &method_iter);
 
         hashmap_entry_t* cur_entry = NULL;
         while((cur_entry = hashmap_iterator_next(&method_iter))){
@@ -464,7 +420,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
-                JMethod_t* method = hashmap_get(&metadata->all_methods,mangled_name);
+                JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
                 if(method->flags.is_staticlinked){
@@ -493,7 +449,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
-                JMethod_t* method = hashmap_get(&metadata->all_methods,mangled_name);
+                JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
                 JInterfaceMethodRef_t* ref = bumper_alloc(linker->arena,sizeof(*ref));
@@ -531,6 +487,7 @@ JError_t JLinker_link(JLinker_t* linker){
         FAIL_SET_JUMP(new_class,err,JERR_UNKNOWN,exit); //This should not really fail at this stage, but if, i dont known. U fucked up already?
 
         new_class->flags.is_final = ((cur_raw->flags & ACC_FINAL) == ACC_FINAL);
+        new_class->linker = linker;
 
         for(unsigned i = 1; i < cur_raw->constantpool.count; i++){
             JConstant_t* constant = JConstantPool_get(&cur_raw->constantpool,i);
@@ -628,4 +585,45 @@ JError_t JLinker_link(JLinker_t* linker){
 
 exit:
     return err;
+}
+
+JClass_t* JClass_get(JLinker_t* linker, char* class_name){
+    return linker && class_name ? hashmap_get(&linker->class_map,class_name) : NULL;
+}
+
+//It requires MANGLED name. in name@description format!
+JMethod_t* JClass_get_method(JClass_t* class, char* method_name){
+    JMethod_t* found = NULL;
+    if(class && method_name){
+        JLinkerMetadata_t* class_metadata = class->metadata;
+        found = hashmap_get(&class_metadata->methods,method_name);
+    }
+    return found;
+}
+
+JField_t* JClass_get_field(JClass_t* class, char* field_name){
+    JField_t* found = NULL;
+    if(class && field_name){
+        JLinkerMetadata_t* class_metadata = class->metadata;
+        found = hashmap_get(&class_metadata->fields,field_name);
+
+        if(found->flags.is_static && found->flags.is_unitialised){
+            //Init this field now...
+            size_t field_size = value_sizeof(found->type);
+            void* field_pos = &class->linker->linker_global_data.sfield_memory[found->offset];
+
+            switch(found->type){
+                case EJVT_REFERENCE:{
+                    assert(0 && "Proper string initialisation should be done!");
+                }
+                break;
+
+
+                default:
+                    memcpy(field_pos,found->constvalue,field_size);
+                    break;
+            }
+        }
+    }
+    return found;    
 }

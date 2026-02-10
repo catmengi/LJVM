@@ -73,7 +73,7 @@ typedef struct{
     }*exception_table;
 
     struct list_head attributes;
-}JRawCodeAttribute_t;
+}JCodeAttribute_t;
 
 //Using list for attributes to store only known to loader attributes, unknown just ignored
 typedef struct{

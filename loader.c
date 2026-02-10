@@ -158,7 +158,7 @@ typedef struct{
 
 static JError_t parse_attributes(struct list_head* output_list,JRawClass_t* current_class, bump_allocator_t* arena, memstream_t* stream);
 static void* code_parse(bump_allocator_t* arena, JRawClass_t* current_class, memstream_t* stream){
-    JRawCodeAttribute_t* code = bumper_calloc(arena,1,sizeof(*code));
+    JCodeAttribute_t* code = bumper_calloc(arena,1,sizeof(*code));
     if(!code) return NULL;
 
     if(memstream_readU16(stream,&code->max_stack) != MSERR_OK) return NULL;
