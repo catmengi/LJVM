@@ -9,6 +9,10 @@ class dummy implements dummyI{
     static void dummy_method(){}
     void non_static_dummy(){};
 
+    public static void main(String[] args){
+        
+    }
+
     static{
         bi = 2223;
     }

@@ -1,4 +1,6 @@
 #include "bumper.h"
+
+#include <sys/types.h>
 #include <string.h>
 
 int bumper_create(bump_allocator_t* arena, size_t size){

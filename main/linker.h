@@ -12,6 +12,12 @@ typedef struct JLinker_t{
     struct list_head class_list;
 
     struct{
+        union{ //Runtime only flags
+            uint16_t flags;
+            struct{
+                bool is_firstlaunch:1;
+            };
+        }linker_flags;
         size_t sfield_curoffset;
         uint8_t* sfield_memory;
     }linker_global_data;

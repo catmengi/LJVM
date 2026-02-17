@@ -18,6 +18,8 @@ int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
     linker->arena = arena;
     linker->loader = loader;
 
+    linker->linker_global_data.linker_flags.is_firstlaunch = 1;
+
     INIT_LIST_HEAD(&linker->class_list);
     return hashmap_init(&linker->class_map,32,linker_ht_arena_alloc,linker->arena);
 }
@@ -53,13 +55,6 @@ static size_t value_sizeof(JValueType_t type){
 static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     void* ret_val = NULL;
     
-    JClass_t* class = bumper_calloc(linker->arena,1,sizeof(*class));
-    FAIL_SET_JUMP(class,ret_val,NULL,exit);
-
-    INIT_LIST_HEAD(&class->children);
-    INIT_LIST_HEAD(&class->as_child);
-    INIT_LIST_HEAD(&class->list);
-
     //Lookup name
     JConstant_t* sclass_constant = JConstantPool_get(&raw_class->constantpool, raw_class->this_class);
     FAIL_SET_JUMP(sclass_constant && sclass_constant->type == EJCT_CLASS,ret_val,NULL,exit);
@@ -68,6 +63,19 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     FAIL_SET_JUMP(sname_constant && sname_constant->type == EJCT_UTF8,ret_val,NULL,exit);
 
     JRawUTF8_t* name_utf8 = sname_constant->value;
+
+    //Create class
+    JClass_t* class = hashmap_get(&linker->class_map,(char*)name_utf8->string);
+    if(!class)
+        class = bumper_calloc(linker->arena,1,sizeof(*class)); //Class does not exist, create new
+    else goto exit;
+
+    FAIL_SET_JUMP(class,ret_val,NULL,exit);
+    class->flags.flags = 0;
+
+    INIT_LIST_HEAD(&class->children);
+    INIT_LIST_HEAD(&class->as_child);
+    INIT_LIST_HEAD(&class->list);
 
     class->name = (char*)name_utf8->string; //There is normal C string, except that it is in java encoding.....
 
@@ -179,7 +187,7 @@ static JError_t parse_method_prototype(JMethod_t* method, const char* descriptor
 //Recursive shit
 static JError_t build_class(JLinker_t* linker, JClass_t* class){
     JError_t err = JERR_OK;
-    if(class->flags.is_initialised) goto exit; //Skip this class, already initialised
+    if(class->flags.is_initialised) goto iterate_children; //Skip this class, already initialised
 
     JLinkerMetadata_t* metadata = class->metadata;
     JLinkerMetadata_t* parent_metadata = class->parent ? class->parent->metadata : NULL;
@@ -290,7 +298,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         method->flags.is_frominterface = is_interface;
         method->flags.is_set = 0;
 
-        if(!method->flags.is_native){
+        if(method->flags.is_native){
                 //TODO("PARSE CODE ATTRIBUTE!!!!!");
         } else {
             JRawAttribute_t* current_attribute = NULL; //Using raw code attribute because we can directly use it (via our constant pool)
@@ -363,10 +371,12 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
     }
     class->ifields_size = metadata->ifield_curoffset;
 
+iterate_children:
     JClass_t* child = NULL;
     list_for_each_entry(child,&class->children, as_child){
         FAIL_SET_JUMP(build_class(linker,child) == JERR_OK,err,JERR_UNKNOWN,exit);
     }
+    class->flags.is_initialised = 1;
 
 exit:
     return err;
@@ -385,6 +395,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_FIELDREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* field_class = class->constantpool.constants[fmim_ref->class_index].value;
+                if(!field_class) continue; //Used to skip ref if class is not loaded
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -410,6 +421,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_METHODREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
+                if(!method_class) continue; //Used to skip ref if class is not loaded
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -441,6 +453,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_INTERFACE_METHODREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
+                if(!method_class) continue; //Used to skip ref if class is not loaded
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -486,6 +499,9 @@ exit:
 
 JError_t JLinker_link(JLinker_t* linker){
     JError_t err = JERR_OK;
+    void* old_sfields = linker->linker_global_data.sfield_memory;
+    unsigned old_sfields_size = linker->linker_global_data.sfield_curoffset; //Used when non first launch!
+    JRawClass_t empty_description = {0}; //Array classes stub
 
     //Step 0: create all classes and parse simple constants (values)
     JRawClass_t* cur_raw = NULL;
@@ -493,28 +509,29 @@ JError_t JLinker_link(JLinker_t* linker){
         JClass_t* new_class = create_class(linker,cur_raw);
         FAIL_SET_JUMP(new_class,err,JERR_UNKNOWN,exit); //This should not really fail at this stage, but if, i dont known. U fucked up already?
 
-        new_class->flags.is_final = ((cur_raw->flags & ACC_FINAL) == ACC_FINAL);
-        new_class->flags.is_initialised = 0;
-        new_class->linker = linker;
+        if(new_class->flags.is_initialised == 0){
+            new_class->flags.is_final = ((cur_raw->flags & ACC_FINAL) == ACC_FINAL);
+            new_class->linker = linker;
 
-        for(unsigned i = 1; i < cur_raw->constantpool.count; i++){
-            JConstant_t* constant = JConstantPool_get(&cur_raw->constantpool,i);
-            switch(constant->type){
-                case EJCT_INT:
-                case EJCT_FLOAT:
-                    new_class->constantpool.constants[i].type = constant->type == EJCT_INT ? EJRCT_INT : EJRCT_FLOAT;
-                    new_class->constantpool.constants[i].value = constant->value;
-                break;
+            for(unsigned i = 1; i < cur_raw->constantpool.count; i++){
+                JConstant_t* constant = JConstantPool_get(&cur_raw->constantpool,i);
+                switch(constant->type){
+                    case EJCT_INT:
+                    case EJCT_FLOAT:
+                        new_class->constantpool.constants[i].type = constant->type == EJCT_INT ? EJRCT_INT : EJRCT_FLOAT;
+                        new_class->constantpool.constants[i].value = constant->value;
+                    break;
 
-                case EJCT_LONG:
-                case EJCT_DOUBLE:
-                    new_class->constantpool.constants[i].type = constant->type == EJCT_LONG ? EJRCT_LONG : EJRCT_DOUBLE;
-                    new_class->constantpool.constants[i].value = constant->value;
-                    i++;
-                break;
+                    case EJCT_LONG:
+                    case EJCT_DOUBLE:
+                        new_class->constantpool.constants[i].type = constant->type == EJCT_LONG ? EJRCT_LONG : EJRCT_DOUBLE;
+                        new_class->constantpool.constants[i].value = constant->value;
+                        i++;
+                    break;
 
 
-                default: break;
+                    default: break;
+                }
             }
         }
     }
@@ -527,13 +544,13 @@ JError_t JLinker_link(JLinker_t* linker){
         JLinkerMetadata_t* metadata = cur_class->metadata;
         JRawClass_t* description = metadata->raw_self;
 
-        if(!cur_class->flags.is_initialised){
-            JConstant_t* super_class = JConstantPool_get(&description->constantpool, description->super_class);
-            if(super_class->type == EJCT_NULL){ //This is a root object. Treat it separately
-                list_add(&cur_class->as_child,&root_list);
-                continue;
-            }
+        JConstant_t* super_class = JConstantPool_get(&description->constantpool, description->super_class);
+        if(super_class->type == EJCT_NULL){ //This is a root object. Treat it separately
+            list_add(&cur_class->as_child,&root_list); //Adding to root list even if it is unitialised(otherwise we cant reach others)
+            continue;
+        }
 
+        if(!cur_class->flags.is_initialised){
             FAIL_SET_JUMP(super_class->type == EJCT_CLASS, err, JERR_BADPARAM,exit);
 
             JConstant_t* super_name = JConstantPool_get(&description->constantpool, *(uint16_t*)super_class->value);
@@ -572,6 +589,7 @@ JError_t JLinker_link(JLinker_t* linker){
 
                 //TODO: interfaces
 
+                array_class->flags.is_initialised = 0;
                 array_class->linker = linker;
                 list_add(&array_class->list,&linker->class_list);
                 list_add(&array_class->as_child,&array_class->parent->children);
@@ -582,8 +600,7 @@ JError_t JLinker_link(JLinker_t* linker){
                 hashmap_init(&array_metadata->fields,1,linker_ht_arena_alloc,linker->arena);
                 hashmap_init(&array_metadata->methods,1,linker_ht_arena_alloc,linker->arena);
 
-                array_metadata->raw_self = bumper_calloc(linker->arena,1,sizeof(*array_metadata->raw_self));
-                FAIL_SET_JUMP(array_metadata->raw_self,err,JERR_OOM,exit);
+                array_metadata->raw_self = &empty_description;
 
                 array_class->metadata = array_metadata;
                 FAIL_SET_JUMP(hashmap_set(&linker->class_map,class_name,array_class) == 0,err,JERR_OOM,exit);
@@ -616,12 +633,20 @@ JError_t JLinker_link(JLinker_t* linker){
     list_for_each_entry(cur_root,&root_list,as_child){
         FAIL_SET_JUMP(link_class(linker,cur_root) == JERR_OK,err,JERR_UNKNOWN,exit);
     }
+
+
     linker->linker_global_data.sfield_memory = bumper_calloc(linker->arena,linker->linker_global_data.sfield_curoffset,1);
     FAIL_SET_JUMP(linker->linker_global_data.sfield_memory,err,JERR_OOM,exit);
 
+    if(!linker->linker_global_data.linker_flags.is_firstlaunch){
+        memcpy(linker->linker_global_data.sfield_memory,old_sfields,old_sfields_size);
+    }
+
     //TODO: step 4, run verification process
 
+
 exit:
+    linker->linker_global_data.linker_flags.is_firstlaunch = 0;
     return err;
 }
 

@@ -84,7 +84,8 @@ typedef struct{
 typedef struct JLinker_t JLinker_t;
 
 enum{
-    EJRCT_STRING = 1,
+    EJRCT_NULL,
+    EJRCT_STRING,
     EJRCT_INT,
     EJRCT_LONG,
     EJRCT_FLOAT,
@@ -129,6 +130,7 @@ typedef struct JClass_t{
     JMethodTable_t vtable; //Vtable for instance methods
     JFieldTable_t fields[2]; //0: instance fields, 1: static fields. Will be used for GC scanning
     size_t ifields_size; //Ammount of memory required for ifields of this object
+    //TODO: stackmap field if not native
 
     void* metadata;
 }JClass_t;
