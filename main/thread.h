@@ -31,7 +31,7 @@ typedef struct{
 }JThread_t;
 
 extern __thread JThread_t* g_JCurrentThread;
-JThread_t* JThread_init(JVM_t* vm, SemaphoreHandle_t notify_when_done);
+JThread_t* JThread_init(VM_t* vm, SemaphoreHandle_t notify_when_done);
 JFrame_t* JThread_push_iframe(JMethod_t* method);
 JFrame_t* JThread_push_nframe(JMethod_t* method);
 JError_t JThread_pop_frame();

@@ -13,7 +13,7 @@ __thread JThread_t* g_JCurrentThread = NULL;
 //Create thread object, init it, add to thread list, and notify someone who waits(if exists)
 //In theory i can use notify_when_done for thread creation from java
 //USE IT ONLY IF DIDNT INITIALISE(called JThread_init()) THIS FREERTOS TASK BEFORE
-JThread_t* JThread_init(JVM_t* vm, SemaphoreHandle_t notify_when_done){
+JThread_t* JThread_init(VM_t* vm, SemaphoreHandle_t notify_when_done){
     JThread_t* new_thread = malloc(sizeof(*new_thread));
     if(!new_thread) goto cleanup;    
 
