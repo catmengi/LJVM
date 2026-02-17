@@ -14,7 +14,7 @@
 typedef struct{
     struct list_head list; //This list is used to store thread in JVM
     struct list_head waiting_on; //This list is used to store thread inside monitor while wait
-    JVM_t* vm;
+    VM_t* vm;
     enum{
         EJTS_RUNNING = 0,
         EJTS_NATIVE = 1, //Can directly change them with JFrame_t->is_native
