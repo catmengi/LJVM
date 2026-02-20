@@ -16,10 +16,6 @@ typedef enum{
 typedef struct JClass_t JClass_t;
 
 typedef struct{
-    unsigned vtable_offset;
-}JMethodRef_t;
-
-typedef struct{
     JClass_t* should_implement;
     char* name;
 }JInterfaceMethodRef_t; //I think i would implement default methods in my JVM.... But i dont think someone
@@ -52,7 +48,8 @@ typedef struct{
 }JMethodPrototype_t;
 typedef struct{
     char* name; //This name is not java's raw name, it is name@description
-    JMethodRef_t* methodref;
+    unsigned vtable_index;
+
     JClass_t* owner;
     JMethodPrototype_t prototype;
 
@@ -68,7 +65,7 @@ typedef struct{
         };
     }flags;
 
-    void* method_info;
+    void* method_info; //Method info, either JCompiledCode_t or native method stuff
 }JMethod_t;
 
 typedef struct{
@@ -84,17 +81,17 @@ typedef struct{
 typedef struct JLinker_t JLinker_t;
 
 enum{
-    EJRCT_NULL,
-    EJRCT_STRING,
-    EJRCT_INT,
-    EJRCT_LONG,
-    EJRCT_FLOAT,
-    EJRCT_DOUBLE,
-    EJRCT_CLASS,
-    EJRCT_FIELD,
-    EJRCT_METHOD,
-    EJRCT_METHODREF,
-    EJRCT_INTERFACEMETHODREF,
+    EJRCT_NULL, //nothinh
+    EJRCT_STRING, //TODO
+    EJRCT_INT, //uint32_t*
+    EJRCT_LONG, //uint64_t*
+    EJRCT_FLOAT, //float*
+    EJRCT_DOUBLE, //double*
+    EJRCT_CLASS, //JClass_t*
+    EJRCT_FIELD, //JField_t*
+    EJRCT_METHOD, //JMethod_t*
+    EJRCT_METHODREF, //uint16_t*
+    EJRCT_INTERFACEMETHODREF, //JInterfaceMethodRef_t;
 };
 
 typedef struct JClass_t{

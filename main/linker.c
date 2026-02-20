@@ -1,4 +1,5 @@
 #include "linker.h"
+#include "compiler.h"
 #include "hashmap.h"
 #include "list.h"
 #include "loader.h"
@@ -301,13 +302,27 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         if(method->flags.is_native){
                 //TODO("PARSE CODE ATTRIBUTE!!!!!");
         } else {
+            JCodeAttribute_t* code = NULL;
             JRawAttribute_t* current_attribute = NULL; //Using raw code attribute because we can directly use it (via our constant pool)
             list_for_each_entry(current_attribute,&raw_method->attributes,list){
                 if(current_attribute->type == EJAT_CODE){
-                    method->method_info = current_attribute->info;
+                    code = current_attribute->info;
                     break;
                 }
             }
+            //TODO: do proper compilation, not just build CFG
+
+            JMethodCompiler_t* compiler = bumper_calloc(linker->arena,1,sizeof(*compiler));
+            FAIL_SET_JUMP(compiler,err,JERR_OOM,exit);
+
+            compiler->bytecode = code;
+            compiler->method = method;
+            compiler->arena = linker->arena;
+            FAIL_SET_JUMP(JCFG_generate(compiler,&compiler->root,0) == JERR_OK,err,JERR_UNKNOWN,exit);
+
+            printf("%s: method_name\n",method->name);
+            JCFG_test(compiler->root);
+            puts("=====================");
         }
 
         metadata->methods_count[method->flags.is_staticlinked]++;
@@ -356,16 +371,10 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             if(method->flags.is_set) continue;
             if(method->flags.is_staticlinked) continue;
 
-            assert(method->methodref == NULL);
-
             unsigned method_index = vtable_index++;
+
             new_vtable->methods[method_index] = method;
-
-            JMethodRef_t* new_ref = bumper_alloc(linker->arena,sizeof(*new_ref));
-            FAIL_SET_JUMP(new_ref,err,JERR_OOM,exit);
-
-            new_ref->vtable_offset = method_index;
-            method->methodref = new_ref;
+            method->vtable_index = method_index;
         }
         new_vtable->count = vtable_index;
     }
@@ -395,7 +404,9 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_FIELDREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* field_class = class->constantpool.constants[fmim_ref->class_index].value;
-                if(!field_class) continue; //Used to skip ref if class is not loaded
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -421,7 +432,9 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_METHODREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
-                if(!method_class) continue; //Used to skip ref if class is not loaded
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -443,9 +456,8 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                     class->constantpool.constants[i].type = EJRCT_METHOD;
                     class->constantpool.constants[i].value = method;
                 } else{
-                    FAIL_SET_JUMP(method->methodref,err,JERR_UNKNOWN,exit);
                     class->constantpool.constants[i].type = EJRCT_METHODREF;
-                    class->constantpool.constants[i].value = method->methodref;
+                    class->constantpool.constants[i].value = &method->vtable_index;
                 }
             }
             break;
@@ -453,7 +465,9 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
             case EJCT_INTERFACE_METHODREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
-                if(!method_class) continue; //Used to skip ref if class is not loaded
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -585,7 +599,6 @@ JError_t JLinker_link(JLinker_t* linker){
 
                 array_class->name = class_name;
                 array_class->parent = hashmap_get(&linker->class_map, "java/lang/Object");
-                assert(array_class->parent);
 
                 //TODO: interfaces
 
