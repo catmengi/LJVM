@@ -6,7 +6,7 @@ DONE:
 
 TO BE DONE:
 1. Native method lookup
-2. Interpreter
+2. AOT
 3. Thread system
 4. Locking system (monitors)
 5. CLDC support
