@@ -1,11 +1,11 @@
 #include "linker.h"
-#include "compiler.h"
 #include "hashmap.h"
 #include "list.h"
 #include "loader.h"
 #include "jerror.h"
 #include "bumper.h"
 #include "class.h"
+#include "cfg.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -310,19 +310,10 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
                     break;
                 }
             }
-            //TODO: do proper compilation, not just build CFG
-
-            JMethodCompiler_t* compiler = bumper_calloc(linker->arena,1,sizeof(*compiler));
-            FAIL_SET_JUMP(compiler,err,JERR_OOM,exit);
-
-            compiler->bytecode = code;
-            compiler->method = method;
-            compiler->arena = linker->arena;
-            FAIL_SET_JUMP(JCFG_generate(compiler,&compiler->root,0) == JERR_OK,err,JERR_UNKNOWN,exit);
-
-            printf("%s: method_name\n",method->name);
-            JCFG_test(compiler->root);
-            puts("=====================");
+            JCFG_t cfg = {0};
+            JCFG_init(&cfg,code,linker->arena);
+            JCFG_build(&cfg);
+            printf("BUILD CFG => COMPILE METHOD => ???\n");
         }
 
         metadata->methods_count[method->flags.is_staticlinked]++;
@@ -405,9 +396,6 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* field_class = class->constantpool.constants[fmim_ref->class_index].value;
 
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
-
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
                 JRawUTF8_t* name_utf8 = JConstantPool_get(raw_constantpool, nameandtype->name_index)->value;
@@ -418,6 +406,11 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
+                                ({printf("Constant type isnt class for field: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
+                                ({printf("Constant type is class, but it is NULL for field: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
 
                 JLinkerMetadata_t* metadata = field_class->metadata;
 
@@ -433,9 +426,6 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
 
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
-
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
                 JRawUTF8_t* name_utf8 = JConstantPool_get(raw_constantpool, nameandtype->name_index)->value;
@@ -446,6 +436,11 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
+                                ({printf("Constant type isnt class for method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
+                                ({printf("Constant type is class, but it is NULL for method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
@@ -466,9 +461,6 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
                 JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
 
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJCT_CLASS,err,JERR_BADPARAM,exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,JERR_BADPARAM,exit);
-
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
                 JRawUTF8_t* name_utf8 = JConstantPool_get(raw_constantpool, nameandtype->name_index)->value;
@@ -479,6 +471,11 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
+
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
+                                ({printf("Constant type isnt class for interface method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
+                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
+                                ({printf("Constant type is class, but it is NULL for interface method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
@@ -620,6 +617,8 @@ JError_t JLinker_link(JLinker_t* linker){
 
                 refered_class = array_class;
             }
+            FAIL_SET_JUMP(refered_class,err,({printf("Cannot find class: %s\n",class_name);(JERR_NOTFOUND);}),exit);
+
             cur_class->constantpool.constants[i].type = EJRCT_CLASS;
             cur_class->constantpool.constants[i].value = refered_class; //Add this class to constantpool
         }

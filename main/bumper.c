@@ -13,6 +13,13 @@ int bumper_create(bump_allocator_t* arena, size_t size){
     return 0;
 }
 
+int bumper_create_from(bump_allocator_t* arena, void* arena_memory, size_t size){
+    arena->last_end = arena->memory = arena_memory;
+    arena->size = size;
+
+    return 0;
+}
+
 void bumper_destroy(bump_allocator_t* arena){
     SYS_FREE(arena->memory);
 }

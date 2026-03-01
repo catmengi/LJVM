@@ -15,6 +15,7 @@ typedef struct{
 }bump_allocator_t;
 
 int bumper_create(bump_allocator_t* arena, size_t size);
+int bumper_create_from(bump_allocator_t* arena, void* arena_memory, size_t size);
 void bumper_destroy(bump_allocator_t* arena);
 void bumper_reset(bump_allocator_t* arena);
 

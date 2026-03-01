@@ -48,7 +48,7 @@ typedef struct{
 }JMethodPrototype_t;
 typedef struct{
     char* name; //This name is not java's raw name, it is name@description
-    unsigned vtable_index;
+    uint16_t vtable_index;
 
     JClass_t* owner;
     JMethodPrototype_t prototype;
