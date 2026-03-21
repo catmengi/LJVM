@@ -49,7 +49,7 @@ typedef struct{
 
 typedef struct{
     void* value;
-    JConstantType_t type;
+    uint8_t type;
 }JConstant_t;
 
 typedef struct{
@@ -79,7 +79,7 @@ typedef struct{
 typedef struct{
     struct list_head list;
 
-    JRawAttributeType_t type;
+    uint8_t type;
     void* info;
 }JRawAttribute_t;
 

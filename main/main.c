@@ -1,7 +1,7 @@
 #include "bumper.h"
-#include "hal/gpio_types.h"
+#include "cfg.h"
+#include "class.h"
 #include "linker.h"
-#include "driver/gpio.h"
 #include "preloader.h"
 
 void app_main(){
@@ -18,4 +18,5 @@ void app_main(){
 
     void* arena_top = bumper_alloc(&arena,0);
     printf("used memory: %zu\n",arena_top - bumper_arena_start(&arena));
+    printf("%d\n",0 % 8);
 }

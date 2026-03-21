@@ -1,10 +1,15 @@
 #include "cfg.h"
 #include "bumper.h"
+#include "class.h"
 #include "jerror.h"
 #include "list.h"
 #include "loader.h"
 
+#include <stdint.h>
 #include <string.h>
+#include <assert.h>
+#include <math.h>
+
 #include "opcodes.h"
 #include "lb_endian.h"
 
@@ -183,10 +188,11 @@ uint8_t opcode_sizes[256] = {
     [EJOPCODE_IMPDEP1] = 1, [EJOPCODE_IMPDEP2] = 1
 };
 
-JError_t JCFG_init(JCFG_t* cfg, JCodeAttribute_t* bytecode, bump_allocator_t* arena){
+JError_t JCFG_init(JCFG_t* cfg, JCodeAttribute_t* bytecode,JMethod_t* method, bump_allocator_t* arena){
     memset(cfg,0,sizeof(*cfg));
     cfg->bytecode = bytecode;
     cfg->arena = arena;
+    cfg->method = method;
     
     return JERR_OK;
 }
@@ -292,6 +298,24 @@ static JError_t count_labels(JCFG_t* cfg){
                 }
                 break;
 
+            //Thoose counted as labels because GC might want stackmap from there(thinking about the future!)
+            case EJOPCODE_INVOKEINTERFACE:
+            case EJOPCODE_INVOKEVIRTUAL:
+            case EJOPCODE_INVOKESTATIC:
+            case EJOPCODE_INVOKESPECIAL:
+            case EJOPCODE_NEW:
+            case EJOPCODE_NEWARRAY:
+            case EJOPCODE_ANEWARRAY:
+            case EJOPCODE_MULTIANEWARRAY:{
+                    JCFGTemporaryLabel_t* new_label = alloca(sizeof(*new_label));
+                    INIT_LIST_HEAD(&new_label->list);
+                    list_add_tail(&new_label->list,&labels_list);
+                    new_label->target = pc;
+                    
+                    labels_count++;
+            }
+            break;
+
             case EJOPCODE_IFEQ:
             case EJOPCODE_IFNE:
             case EJOPCODE_IFLT:
@@ -362,6 +386,40 @@ exit:
     return err;
 }
 
+//Just allocate, not build it yet
+
+static JError_t alloc_state(JCFGBlockTypeInfo_t* type_info, JCFG_t* cfg){
+    JError_t err = JERR_OK;
+
+    type_info->stack_bitmap_size = (cfg->bytecode->max_stack / 8) + 1;
+    type_info->locals_bitmap_size = (cfg->bytecode->max_locals / 8) + 1;
+
+    type_info->stack_size = 0;
+
+    FAIL_SET_JUMP((type_info->stack_bitmap = bumper_calloc(cfg->arena,1,type_info->stack_bitmap_size)),err,JERR_OOM,exit);
+    FAIL_SET_JUMP((type_info->locals_bitmap = bumper_calloc(cfg->arena,1,type_info->locals_bitmap_size)),err,JERR_OOM,exit);
+
+exit:
+    return err;    
+}
+
+static JError_t alloc_typeinfo(JCFGBlock_t* block, JCFG_t* cfg){
+    JError_t err = JERR_OK;
+
+    FAIL_SET_JUMP((err = alloc_state(&block->in_state, cfg)) == JERR_OK,err,err,exit);
+    FAIL_SET_JUMP((err = alloc_state(&block->out_state, cfg)) == JERR_OK,err,err,exit);
+    FAIL_SET_JUMP((err = alloc_state(&block->safepoint_state, cfg)) == JERR_OK,err,err,exit);
+
+exit:
+    return err;
+}
+
+#define IS_REF(bitmap, idx) (((bitmap)[(idx) > 0 ? (idx)/8 : 0] >> ((idx) > 0 ? (idx)%8 : 0)) & 1)
+#define SET_REF(bitmap, idx) (bitmap)[(idx) > 0 ? (idx)/8 : 0] |= (1 << ((idx) > 0 ? (idx)%8 : 0))
+#define CLEAR_REF(bitmap, idx) (bitmap)[(idx) > 0 ? (idx)/8 : 0] &= ~(1 << ((idx) > 0 ? (idx)%8 : 0))
+#define PUSH(bitmap, sp, is_ref) ({if((is_ref))  {SET_REF((bitmap),(*sp));} else {CLEAR_REF((bitmap),(*sp));} (*sp)++;})
+#define POP(bitmap, sp) ({--(*sp); (IS_REF((bitmap),(*sp)));})
+
 //Create blocks, but dont build graph yet
 static JError_t create_blocks(JCFG_t* cfg){
     JError_t err = JERR_OK;
@@ -380,6 +438,7 @@ static JError_t create_blocks(JCFG_t* cfg){
 
         new_block->start_pc = start_pc;
         new_block->end_pc = end_pc;
+        FAIL_SET_JUMP(alloc_typeinfo(new_block, cfg) == JERR_OK,err,JERR_UNKNOWN,exit);
 
         cfg->blocks[block_index++] = new_block;
     }
@@ -392,6 +451,10 @@ static JError_t create_blocks(JCFG_t* cfg){
 
         handler->start_pc = exception->handler_pc;
         handler->end_pc = cfg->bytecode->code_length;
+        handler->flags.is_exception = 1;
+        FAIL_SET_JUMP(alloc_typeinfo(handler, cfg) == JERR_OK,err,JERR_UNKNOWN,exit);
+
+        PUSH(handler->in_state.stack_bitmap,&handler->in_state.stack_size,1);
 
         cfg->blocks[block_index++] = handler;
     }
@@ -403,13 +466,13 @@ exit:
 }
 
 typedef struct{
-    void** values;
+    uintptr_t* values;
     unsigned sp;
-}JCFGTemporaryBlockStack_t;
+}JCFGTemporaryStack_t;
 
-#define INIT_BLOCK_STACK(stack,size) ({(stack)->values = alloca(sizeof(void*) * size); (stack)->sp = 0;})
-#define STACK_POP(stack) ({void* retval = (stack)->sp > 0 ? (stack)->values[--(stack)->sp] : NULL; (retval);})
-#define STACK_PUSH(stack, value) ({(stack)->values[(stack)->sp++] = value;})
+#define INIT_STACK(stack,size) ({(stack)->values = alloca(sizeof(uintptr_t) * size); (stack)->sp = 0;})
+#define STACK_POP(stack) ({uintptr_t retval = (stack)->sp > 0 ? (uintptr_t)((stack)->values[--(stack)->sp]) : (uintptr_t)NULL; (retval);})
+#define STACK_PUSH(stack, value) ({(stack)->values[(stack)->sp++] = (uintptr_t)value;})
 
 static JCFGBlock_t* find_cfg_block(JCFG_t* cfg, uint32_t start_pc){
     JCFGBlock_t template = {
@@ -421,16 +484,30 @@ static JCFGBlock_t* find_cfg_block(JCFG_t* cfg, uint32_t start_pc){
     return found ? *found : NULL;
 }
 
+static unsigned count_throws_by_block(JCFG_t* cfg, JCFGBlock_t* block){
+    JCodeAttribute_t* code = cfg->bytecode;
+    unsigned retval = 0;
+    for(unsigned i = 0; i < code->exception_table_length; i++){
+        typeof(code->exception_table[0])* exception = &code->exception_table[i];
+        if(exception->start_pc == block->start_pc && exception->end_pc == block->end_pc){
+            retval++;
+        }
+    }
+
+    return retval;
+}
+
 static JError_t build_graph(JCFG_t* cfg){
     JError_t err = JERR_OK;
 
-    JCFGTemporaryBlockStack_t stack = {0};
-    INIT_BLOCK_STACK(&stack, cfg->block_count);
+    JCFGTemporaryStack_t stack = {0};
+    INIT_STACK(&stack, cfg->block_count);
 
     cfg->exceptions_count = cfg->bytecode->exception_table_length;
     cfg->exceptions = bumper_calloc(cfg->arena,cfg->exceptions_count,sizeof(*cfg->exceptions));
     FAIL_SET_JUMP(cfg->exceptions,err,JERR_OOM,exit);
 
+    uint8_t exception_dedup_id = 0xEE;
     for(unsigned i = 0; i < cfg->exceptions_count; i++){
         JCFGException_t* cfg_exception = &cfg->exceptions[i];
         typeof(cfg->bytecode->exception_table[0])* exception = &cfg->bytecode->exception_table[i];
@@ -438,10 +515,16 @@ static JError_t build_graph(JCFG_t* cfg){
         cfg_exception->catch_type = exception->catch_type;
         cfg_exception->start_pc = exception->start_pc;
         cfg_exception->end_pc = exception->end_pc;
-        cfg_exception->handler = find_cfg_block(cfg,exception->handler_pc);
-        FAIL_SET_JUMP(cfg_exception->handler,err,JERR_NOTFOUND,exit);
+        FAIL_SET_JUMP((cfg_exception->handler = find_cfg_block(cfg,exception->handler_pc)),err,JERR_OOM,exit);
+        
+        JCFGBlock_t* handler = cfg_exception->handler;
+        //JCFGBlock_t* trigger = find_cfg_block(cfg, cfg_exception->start_pc);
+        //FAIL_SET_JUMP(trigger,err,JERR_NOTFOUND,exit);
 
-        STACK_PUSH(&stack,cfg_exception->handler);
+        if(handler->visit_id != exception_dedup_id){ //No need to add it to stack twice
+            handler->visit_id = exception_dedup_id;
+            STACK_PUSH(&stack,handler); //Build this block
+        }
     }
 
     JCFGBlock_t* root = find_cfg_block(cfg,0);
@@ -451,10 +534,11 @@ static JError_t build_graph(JCFG_t* cfg){
     STACK_PUSH(&stack, root); 
 
 
+    uint8_t visit_id = 0xCE;
     uint8_t* code = cfg->bytecode->code;
     JCFGBlock_t* cur_block = NULL;
-    while((cur_block = STACK_POP(&stack))){
-        cur_block->flags.generated = 1;
+    while((cur_block = (void*)STACK_POP(&stack))){
+        cur_block->visit_id = visit_id;
         
         for(uint32_t pc = cur_block->start_pc; pc < cur_block->end_pc; pc += opcode_sizes[code[pc]]){
             JOpcode_t opcode = code[pc];
@@ -479,13 +563,14 @@ static JError_t build_graph(JCFG_t* cfg){
 
                     cur_block->children[0] = target;
  
-                    if(!target->flags.generated)
+                    if(target->visit_id != visit_id)
                         STACK_PUSH(&stack,target);
 
                     goto loop_end;
                 }
                 break;
 
+                #if 0
                 case EJOPCODE_JSR:
                 case EJOPCODE_JSR_W:{
                     int32_t offset = opcode == EJOPCODE_JSR ? (int16_t)be16_to_cpu(*(uint16_t*)&code[pc + 1]) : (int32_t)be32_to_cpu(*(uint32_t*)&code[pc + 1]);
@@ -507,15 +592,22 @@ static JError_t build_graph(JCFG_t* cfg){
                     cur_block->children[0] = fall_target;
                     cur_block->children[1] = jump_target;
  
-                    if(!fall_target->flags.generated)
+                    if(fall_target->visit_id != visit_id)
                         STACK_PUSH(&stack,fall_target);
 
-                    if(!jump_target->flags.generated)
+                    if(jump_target->visit_id != visit_id)
                         STACK_PUSH(&stack,jump_target);
 
                     goto loop_end;
                 }
                 break;
+                #else
+                #define RET_DISABLED
+                case EJOPCODE_JSR:
+                case EJOPCODE_JSR_W:
+                case EJOPCODE_RET:
+                    assert(0 && "JSR ARE NOT SUPPORT! DO INLINING LATER!");
+                #endif
 
                 case EJOPCODE_IFEQ:
                 case EJOPCODE_IFNE:
@@ -552,10 +644,10 @@ static JError_t build_graph(JCFG_t* cfg){
                     cur_block->children[0] = fall_target;
                     cur_block->children[1] = jump_target;
  
-                    if(!fall_target->flags.generated)
+                    if(fall_target->visit_id != visit_id)
                         STACK_PUSH(&stack,fall_target);
 
-                    if(!jump_target->flags.generated)
+                    if(jump_target->visit_id != visit_id)
                         STACK_PUSH(&stack,jump_target);
 
                     goto loop_end;
@@ -568,7 +660,9 @@ static JError_t build_graph(JCFG_t* cfg){
                     break;
 
                 case EJOPCODE_ATHROW:
+                #ifndef RET_DISABLED
                 case EJOPCODE_RET:
+                #endif
                 case EJOPCODE_RETURN:
                 case EJOPCODE_IRETURN:
                 case EJOPCODE_LRETURN:
@@ -592,12 +686,565 @@ static JError_t build_graph(JCFG_t* cfg){
                 FAIL_SET_JUMP(cur_block->children,err,JERR_OOM,exit);
 
                 cur_block->children[0] = possible_continue;
-                if(!possible_continue->flags.generated)
+                if(possible_continue->visit_id != visit_id)
                     STACK_PUSH(&stack,possible_continue);
             }
         }
 
     }
+exit:
+    return err;
+}
+
+static bool is_locals_equal(JCFGBlockTypeInfo_t* a, JCFGBlockTypeInfo_t* b){
+    if(a->locals_size != b->locals_size)
+        return false;
+
+    unsigned size = a->locals_bitmap_size;
+    return memcmp(a->locals_bitmap,b->locals_bitmap,size) == 0 ? true : false;
+}
+
+static bool is_stack_equal(JCFGBlockTypeInfo_t* a, JCFGBlockTypeInfo_t* b){
+    if(a->stack_size != b->stack_size)
+        return false;
+
+    unsigned size = a->stack_size;
+    for(unsigned i = 0; i < size; i++){
+        if(IS_REF(a->stack_bitmap,i) != IS_REF(b->stack_bitmap,i))
+            return false;
+    }
+
+    return true;
+}
+
+static bool is_typeinfo_equal(JCFGBlockTypeInfo_t* a, JCFGBlockTypeInfo_t* b){
+    if(is_locals_equal(a,b)){
+        if(is_stack_equal(a, b)){
+            return true;
+        }
+    }
+    return false;
+}
+
+//In state should be input state of another block, out_state should be the out_state of the current block. (MEET ONLY LOCALS)
+static JError_t meet_locals(JCFGBlockTypeInfo_t* in_state, JCFGBlockTypeInfo_t* out_state){
+    JError_t err = JERR_OK;
+    FAIL_SET_JUMP(in_state->locals_bitmap_size == out_state->locals_bitmap_size && in_state->locals_size == out_state->locals_size,err,JERR_BADPARAM,exit);
+
+    for(unsigned i = 0; i < in_state->locals_bitmap_size; i++){
+        in_state->locals_bitmap[i] |= out_state->locals_bitmap[i];
+    }
+
+exit:
+    return err;
+}
+
+//In state should be input state of another block, out_state should be the out_state of the current block. (MEET ONLY STACK)
+static JError_t meet_stack(JCFGBlockTypeInfo_t* in_state, JCFGBlockTypeInfo_t* out_state){
+    JError_t err = JERR_OK;
+    FAIL_SET_JUMP(in_state->stack_bitmap_size == out_state->stack_bitmap_size && in_state->stack_size == out_state->stack_size,err,JERR_BADPARAM,exit);
+
+    for(unsigned i = 0; i < in_state->stack_bitmap_size; i++){
+        in_state->stack_bitmap[i] |= out_state->stack_bitmap[i];
+    }
+
+exit:
+    return err;
+}
+
+//In state should be input state of another block, out_state should be the out_state of the current block. (MEET BOTH STACK AND LOCALS)
+static JError_t meet_typeinfo(JCFGBlockTypeInfo_t* in_state, JCFGBlockTypeInfo_t* out_state){
+    JError_t err = JERR_OK;
+
+    FAIL_SET_JUMP((err = meet_locals(in_state, out_state)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP((err = meet_stack(in_state, out_state)) == JERR_OK, err, err, exit);
+
+exit:
+    return err;
+}
+
+static JError_t copy_states(JCFGBlockTypeInfo_t* into, JCFGBlockTypeInfo_t* from){
+    JError_t err = JERR_OK;
+
+    uint8_t* into_locals = into->locals_bitmap;
+    uint8_t* into_stack = into->stack_bitmap;
+
+    *into = *from;
+
+    into->locals_bitmap = into_locals;
+    into->stack_bitmap = into_stack;
+
+    memcpy(into->stack_bitmap,from->stack_bitmap,from->stack_bitmap_size);
+    memcpy(into->locals_bitmap,from->locals_bitmap,from->locals_bitmap_size);
+
+    return err;
+}
+
+static JError_t create_stackmap(JCFG_t* cfg){
+    //TODO: make stack operation safe
+
+    JError_t err = JERR_OK;
+    uint8_t* code = cfg->bytecode->code;
+    JCFGTemporaryStack_t worklist = {0};
+    INIT_STACK(&worklist,cfg->block_count);
+
+    JMethod_t* method = cfg->method;
+    unsigned is_instance = !method->flags.is_static;
+
+    if(is_instance) SET_REF(cfg->root->in_state.locals_bitmap,0);
+    for(unsigned i = is_instance; i < method->prototype.arguments_count + is_instance; i++){
+        if(method->prototype.argument_types[i - is_instance] == EJVT_REFERENCE){
+            SET_REF(cfg->root->in_state.locals_bitmap,i);
+        }
+    }
+
+    uint8_t exception_dedup_tag = 0xFF;
+    for(unsigned i = 0; i < cfg->exceptions_count; i++){
+        JCFGException_t* exception = &cfg->exceptions[i];
+        JCFGBlock_t* handler = exception->handler;
+
+        if(handler->visit_id != exception_dedup_tag){
+            handler->visit_id = exception_dedup_tag;
+
+            //Conservative GC for exception handlers is planned
+            memset(handler->in_state.locals_bitmap,1,handler->in_state.locals_bitmap_size);
+            STACK_PUSH(&worklist,handler);
+        } 
+    }
+
+    STACK_PUSH(&worklist,cfg->root); //We need to manually push root block
+    JCFGBlock_t* cur_block = NULL;
+    
+start:
+    while((cur_block = (void*)STACK_POP(&worklist))){
+        JCFGBlockTypeInfo_t* out_state = &cur_block->out_state;
+        JCFGBlockTypeInfo_t* safepoint_state = &cur_block->safepoint_state;
+        FAIL_SET_JUMP(copy_states(out_state,&cur_block->in_state) == JERR_OK,err,JERR_UNKNOWN,exit);
+        
+        uint16_t* sp = &out_state->stack_size;
+        uint8_t* stack_bitmap = out_state->stack_bitmap;
+        uint8_t* locals_bitmap = out_state->locals_bitmap;
+
+
+        for(uint32_t pc = cur_block->start_pc; pc < cur_block->end_pc; pc += opcode_sizes[code[pc]]){
+            if(pc + opcode_sizes[code[pc]] == cur_block->end_pc){
+                FAIL_SET_JUMP(copy_states(safepoint_state,out_state) == JERR_OK,err,JERR_UNKNOWN,exit);
+            }
+
+            uint8_t* opcode = &code[pc];
+            switch(*opcode){
+                default: break;
+
+                case EJOPCODE_ACONST_NULL:
+                    PUSH(stack_bitmap,sp,1);
+                    break;
+
+                case EJOPCODE_ICONST_M1 ... EJOPCODE_ICONST_5:
+                    PUSH(stack_bitmap,sp,0);
+                    break;
+
+                case EJOPCODE_FSTORE:
+                case EJOPCODE_ISTORE:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                }
+                break;
+                case EJOPCODE_LSTORE:
+                case EJOPCODE_DSTORE:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                    CLEAR_REF(locals_bitmap,index+1);
+                }
+                break;
+                case EJOPCODE_ASTORE:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    SET_REF(locals_bitmap,index);                    
+                }
+                break;
+
+                case EJOPCODE_ISTORE_0 ... EJOPCODE_ISTORE_3:{
+                    uint8_t index = *opcode - EJOPCODE_ISTORE_0;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                }
+                break;
+                case EJOPCODE_FSTORE_0 ... EJOPCODE_FSTORE_3:{
+                    uint8_t index = *opcode - EJOPCODE_FSTORE_0;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                }
+                break;
+                case EJOPCODE_ASTORE_0 ... EJOPCODE_ASTORE_3:{
+                    uint8_t index = *opcode - EJOPCODE_ASTORE_0;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    SET_REF(locals_bitmap,index);
+                }
+                break;
+                case EJOPCODE_LSTORE_0 ... EJOPCODE_LSTORE_3:{
+                    uint8_t index = *opcode - EJOPCODE_LSTORE_0;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                    CLEAR_REF(locals_bitmap,index+1);
+                }
+                break;
+                case EJOPCODE_DSTORE_0 ... EJOPCODE_DSTORE_3:{
+                    uint8_t index = *opcode - EJOPCODE_DSTORE_0;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    CLEAR_REF(locals_bitmap,index);
+                    CLEAR_REF(locals_bitmap,index+1);
+                }
+                break;
+
+                case EJOPCODE_ILOAD:
+                case EJOPCODE_FLOAD:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+                case EJOPCODE_LLOAD:
+                case EJOPCODE_DLOAD:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index + 1) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+                case EJOPCODE_ALOAD:{
+                    uint8_t index = *(opcode + 1);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 1,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,1);
+                }
+                break;
+
+                case EJOPCODE_ILOAD_0 ... EJOPCODE_ILOAD_3:{
+                    uint8_t index = *opcode - EJOPCODE_ILOAD_0;
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+                case EJOPCODE_FLOAD_0 ... EJOPCODE_FLOAD_3:{
+                    uint8_t index = *opcode - EJOPCODE_FLOAD_0;
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+                case EJOPCODE_ALOAD_0 ... EJOPCODE_ALOAD_3:{
+                    uint8_t index = *opcode - EJOPCODE_ALOAD_0;
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 1,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,1);
+                }
+                break;
+                case EJOPCODE_LLOAD_0 ... EJOPCODE_LLOAD_3:{
+                    uint8_t index = *opcode - EJOPCODE_LLOAD_0;
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index + 1) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+                case EJOPCODE_DLOAD_0 ... EJOPCODE_DLOAD_3:{
+                    uint8_t index = *opcode - EJOPCODE_DLOAD_0;
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(IS_REF(locals_bitmap,index + 1) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+
+                case EJOPCODE_SIPUSH:
+                case EJOPCODE_BIPUSH:{
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+
+                case EJOPCODE_IFNONNULL:
+                case EJOPCODE_IFNULL:{
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                }
+                break;
+
+                case EJOPCODE_IFEQ ... EJOPCODE_IFLE:{
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                }
+                break;
+
+                case EJOPCODE_IF_ICMPEQ ... EJOPCODE_IF_ICMPLE:{
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                }
+                break;
+
+                case EJOPCODE_IF_ACMPEQ:
+                case EJOPCODE_IF_ACMPNE:{
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                }
+                break;
+
+                case EJOPCODE_GETFIELD:{
+                    uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+
+                    JField_t* field = method->owner->constantpool.constants[field_index].value;
+                    switch(field->type){
+                        default:
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_LONG:
+                        case EJVT_DOUBLE:
+                            PUSH(stack_bitmap,sp,0);
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_REFERENCE:
+                            PUSH(stack_bitmap,sp,1);
+                            break;
+                    }
+
+                }
+                break;
+                case EJOPCODE_GETSTATIC:{
+                    uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+
+                    JField_t* field = method->owner->constantpool.constants[field_index].value;
+                    switch(field->type){
+                        default:
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_LONG:
+                        case EJVT_DOUBLE:
+                            PUSH(stack_bitmap,sp,0);
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_REFERENCE:
+                            PUSH(stack_bitmap,sp,1);
+                            break;
+                    }
+                }
+                break;
+
+                case EJOPCODE_PUTFIELD:{
+                    uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+
+                    JField_t* field = method->owner->constantpool.constants[field_index].value;
+                    switch(field->type){
+                        default:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            break;
+
+                        case EJVT_LONG:
+                        case EJVT_DOUBLE:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            break;
+
+                        case EJVT_REFERENCE:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                            break;
+                    }
+
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                }
+                break;
+                case EJOPCODE_PUTSTATIC:{
+                    uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+
+                    JField_t* field = method->owner->constantpool.constants[field_index].value;
+                    switch(field->type){
+                        default:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            break;
+
+                        case EJVT_LONG:
+                        case EJVT_DOUBLE:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                            break;
+
+                        case EJVT_REFERENCE:
+                            FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                            break;
+                    }
+                }
+                break;
+
+                case EJOPCODE_IADD:
+                case EJOPCODE_FADD:
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                    break;
+
+                case EJOPCODE_LADD:
+                case EJOPCODE_DADD:
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                    PUSH(stack_bitmap,sp,0);
+                    break;                    
+
+                case EJOPCODE_ARETURN:
+                case EJOPCODE_ATHROW:
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    goto start;
+
+                case EJOPCODE_RETURN:
+                    goto start;
+
+                case EJOPCODE_IRETURN:
+                case EJOPCODE_FRETURN:
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    goto start;
+
+                case EJOPCODE_LRETURN:
+                case EJOPCODE_DRETURN:
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                    goto start;
+
+                case EJOPCODE_LDC2_W:
+                    PUSH(stack_bitmap,sp,0);
+                    PUSH(stack_bitmap,sp,0);
+                    break;
+
+                case EJOPCODE_LDC_W:{
+                    uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+
+                    switch(constant->type){
+                        case EJRCT_CLASS:
+                        case EJRCT_STRING:
+                            PUSH(stack_bitmap,sp,1);
+                            break;
+
+                        case EJRCT_LONG:
+                        case EJRCT_DOUBLE:
+                            PUSH(stack_bitmap,sp,0);
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+                    }
+                }
+                break;
+                case EJOPCODE_LDC:{
+                    uint8_t index = *(opcode + 1);
+                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+
+                    switch(constant->type){
+                        case EJRCT_CLASS:
+                        case EJRCT_STRING:
+                            PUSH(stack_bitmap,sp,1);
+                            break;
+
+                        case EJRCT_LONG:
+                        case EJRCT_DOUBLE:
+                            PUSH(stack_bitmap,sp,0);
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+                    }
+                }
+                break;
+
+                case EJOPCODE_INVOKEINTERFACE:
+                case EJOPCODE_INVOKEVIRTUAL:
+                case EJOPCODE_INVOKESTATIC:
+                case EJOPCODE_INVOKESPECIAL:{
+                    uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+
+                    FAIL_SET_JUMP(constant->type == EJRCT_METHOD,err,JERR_BADPARAM,exit);
+                    JMethod_t* method = constant->value;
+                    
+                    for(unsigned i = method->prototype.arguments_count; i-- > 0;){
+                        switch(method->prototype.argument_types[i]){
+                            default:
+                                FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                                break;
+                            
+                            case EJVT_LONG:
+                            case EJVT_DOUBLE:
+                                FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                                FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
+                                break;
+
+                            case EJVT_REFERENCE:
+                                FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                                break;                                
+                        }
+                    }
+
+                    if(!method->flags.is_static)
+                        FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+
+                    switch(method->prototype.return_type){
+                        default:
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_VOID:
+                            break;
+
+                        case EJVT_LONG:
+                        case EJVT_DOUBLE:
+                            PUSH(stack_bitmap,sp,0);
+                            PUSH(stack_bitmap,sp,0);
+                            break;
+
+                        case EJVT_REFERENCE:
+                            PUSH(stack_bitmap,sp,1);
+                            break;
+                    }
+                }
+                break;
+
+                //TODO: other opcodes handling
+            }
+        }
+
+        for(unsigned i = cur_block->children_count; i-- > 0;){
+            JCFGBlock_t* child = cur_block->children[i];
+            if(!child->flags.is_in_state_initialised){
+                child->flags.is_in_state_initialised = 1;
+                FAIL_SET_JUMP(copy_states(&child->in_state,out_state) == JERR_OK,err,JERR_UNKNOWN,exit);
+                STACK_PUSH(&worklist,child);
+            } else if(!is_typeinfo_equal(out_state, &child->in_state)){
+                meet_typeinfo(&child->in_state,out_state);
+                STACK_PUSH(&worklist,child);
+            }
+        }
+    }
+
+    //Algorithm for stackmap generation!
+    //Will be something like this:
+        //Pop from worklist to current_block
+        //Set out_state to &current_block.out_state
+        //Build out_state (if pc + opcode_size == cur_block->end_pc) swap out_state to temporary one ***or snaphot it to safepoint_state***
+        //Iterate children blocks
+            //If children_block.in_state != out_state
+                //meet(in_state, out_state)
+                //push children_block into worklist
+        //Iterate exception blocks
+            //If exception_block.in_state(locals) != out_state(locals)
+                //meet (in_state(locals),out_state(locals))
+                //push exception_block into worklist
+
+
 exit:
     return err;
 }
@@ -609,6 +1256,7 @@ JError_t JCFG_build(JCFG_t* cfg){
     FAIL_SET_JUMP((err = count_labels(cfg)) == JERR_OK,err,err,exit);
     FAIL_SET_JUMP((err = create_blocks(cfg)) == JERR_OK,err,err,exit);
     FAIL_SET_JUMP((err = build_graph(cfg)) == JERR_OK,err,err,exit);
+    FAIL_SET_JUMP((err = create_stackmap(cfg)) == JERR_OK,err,err,exit);
 
 exit:
     return err;

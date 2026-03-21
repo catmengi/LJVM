@@ -10,6 +10,7 @@ typedef struct JLinker_t{
 
     hashmap_t class_map;
     struct list_head class_list;
+    struct list_head root_list;
 
     struct{
         union{ //Runtime only flags
@@ -18,8 +19,8 @@ typedef struct JLinker_t{
                 bool is_firstlaunch:1;
             };
         }linker_flags;
-        size_t sfield_curoffset;
-        uint8_t* sfield_memory;
+        size_t sfield_curoffset; //sue this field as the size
+                                 //for allocating static field memory
     }linker_global_data;
 }JLinker_t;
 

@@ -17,7 +17,7 @@ static uint32_t murmur3_32_scramble(uint32_t k) {
     return k;
 }
 
-static uint32_t hash_key(const char* key, uint32_t seed) {
+static uint32_t hash_key(const char* key, uint32_t seed){
     size_t len = strlen(key);
     uint32_t h = seed;
     uint32_t k;
@@ -109,11 +109,58 @@ static int rehash(hashmap_t* map) {
     return 0;
 }
 
-int hashmap_init(hashmap_t* map, size_t initial_size, hashmap_alloc_func_t alloc_func, void* alloc_ctx) {
-    assert(map && alloc_func);
+uint32_t hashmap_string_hash(const void* key){
+    return hash_key(key,0);
+}
+
+uint32_t hashmap_pointer_hash(const void* key){
+    size_t len = sizeof(void*);
+    uint32_t h = 0;
+    uint32_t k;
+    const uint8_t* d = (const uint8_t*)&key;
+    const uint32_t* chunks = (const uint32_t*)(d);
+    const uint8_t* tail = (const uint8_t*)(d + (len & ~3));
+
+    for (size_t i = len >> 2; i > 0; i--) {
+        k = *chunks++;
+        h ^= murmur3_32_scramble(k);
+        h = (h << 13) | (h >> 19);
+        h = h * 5 + 0xe6546b64;
+    }
+
+    k = 0;
+    switch (len & 3) {
+        case 3: k ^= tail[2] << 16;
+        case 2: k ^= tail[1] << 8;
+        case 1: k ^= tail[0];
+        h ^= murmur3_32_scramble(k);
+    }
+
+    h ^= len;
+    h ^= h >> 16;
+    h *= 0x85ebca6b;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >> 16;
+
+    return h;
+}
+
+int hashmap_string_cmp(const void* key_a, const void* key_b){
+    return strcmp(key_a,key_b);
+}
+
+int hashmap_pointer_cmp(const void* key_a, const void* key_b){
+    return !(key_a == key_b);
+}
+
+int hashmap_init(hashmap_t* map, size_t initial_size, hashmap_alloc_func_t alloc_func, hashmap_hash_func_t hash_func, hashmap_cmp_func_t cmp_func, void* alloc_ctx){
+    assert(map && alloc_func && hash_func && cmp_func);
     assert((initial_size > 0) && ((initial_size & (initial_size - 1)) == 0)); 
 
     map->alloc_func = alloc_func;
+    map->hash_func = hash_func;
+    map->cmp_func = cmp_func;
     map->alloc_ctx = alloc_ctx;
     map->num_buckets = initial_size;
     map->num_entries = 0;
@@ -131,17 +178,17 @@ void hashmap_destroy(hashmap_t* map) {
     (void)map;
 }
 
-int hashmap_set(hashmap_t* map, const char* key, void* value) {
+int hashmap_set(hashmap_t* map, const void* key, void* value) {
     if ((float)map->num_entries / map->num_buckets > HASHMAP_LOAD_FACTOR_THRESHOLD) {
         if (rehash(map) != 0) return -1;
     }
 
-    uint32_t hash = hash_key(key, 0);
+    uint32_t hash = map->hash_func(key);
     size_t index = hash & (map->num_buckets - 1);
 
     hashmap_entry_t* entry = map->buckets[index];
     while (entry) {
-        if (strcmp(key, entry->key) == 0) {
+        if (map->cmp_func(key, entry->key) == 0) {
             entry->value = value;
             return 0;
         }
@@ -160,13 +207,13 @@ int hashmap_set(hashmap_t* map, const char* key, void* value) {
     return 0;
 }
 
-void* hashmap_get(hashmap_t* map, const char* key) {
-    uint32_t hash = hash_key(key, 0);
+void* hashmap_get(hashmap_t* map, const void* key) {
+    uint32_t hash = map->hash_func(key);
     size_t index = hash & (map->num_buckets - 1);
 
     hashmap_entry_t* entry = map->buckets[index];
     while (entry) {
-        if (strcmp(key, entry->key) == 0) {
+        if (map->cmp_func(key, entry->key) == 0) {
             return entry->value;
         }
         entry = entry->next;
@@ -174,13 +221,13 @@ void* hashmap_get(hashmap_t* map, const char* key) {
     return NULL;
 }
 
-bool hashmap_remove(hashmap_t* map, const char* key) {
-    uint32_t hash = hash_key(key, 0);
+bool hashmap_remove(hashmap_t* map, const void* key) {
+    uint32_t hash = map->hash_func(key);
     size_t index = hash & (map->num_buckets - 1);
 
     hashmap_entry_t** p_entry = &map->buckets[index];
     while (*p_entry) {
-        if (strcmp(key, (*p_entry)->key) == 0) {
+        if (map->cmp_func(key, (*p_entry)->key) == 0) {
             hashmap_entry_t* entry_to_remove = *p_entry;
             *p_entry = entry_to_remove->next;
 

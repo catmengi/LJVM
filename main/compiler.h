@@ -1,67 +1,31 @@
 #pragma once
-
-#include <stdint.h>
+#include "bumper.h"
 #include "class.h"
+#include "opcodes.h"
+#include "cfg.h"
+#include "hashmap.h"
 
-//I plan to implement simple compiler for xtensa lx7 (esp32s3)
-//I dont think this project will be run on any other platform
-//So only AOT will exist...... Maybe.... If i dont rage remove it and make interpreter
-
-typedef struct JCFGBlock_t JCFGBlock_t;
 typedef enum{
-    EJCFGBT_CODE, //No children
-    EJCFGBT_JSR, //children[0] -> block with opcodes right after opcode, children[1] -> block with opcodes at offset
-    EJCFGBT_GOTO, //children[0] -> block with opcodes at offset
-    EJCFGBT_IF, //children[0] -> fallthrough, children[1] -> jump
-}JCFGBlockType_t;
-
-typedef struct JCFGBlock_t{
-    unsigned block_id;
-    unsigned visit_id; //Id to make bugged lookup loops imposible
-    JCFGBlockType_t block_type;
-
-    uint32_t jbpc_start, jbpc_end; //Block start / end in java bytecode
-    uint32_t mcpc_start, mcpc_end; //Block start / end in native code
-    uint32_t mcsize; //Machine code size
-
-
-    unsigned children_count;
-    JCFGBlock_t** children;
-}JCFGBlock_t;
+    EJSYMT_UNKNOWN, //Unknown at compile time symbol should be lookedup by name by loader (used for native methods)
+    EJSYMT_CLASS, 
+    EJSYMT_METHOD, //Static method, vtable indices will be insterted into code via movi
+}JSymbolType_t;
 
 typedef struct{
-    unsigned start_pc, end_pc; //Where exception might happen in java bytecode
-    unsigned catch_type; //0 for finally?
-
-    JCFGBlock_t* handler; //Block of handler
-}JCFGException_t;
-
-typedef struct JMethodCompiler_t{
-    unsigned last_block_id;
-    unsigned last_visit_id; //Counter for lookup iterations
-
-    JMethod_t* method;
-    bump_allocator_t* arena; //Arena for data ONLY
-    //TODO: bump_allocator_t* code_arena; //executable memory arena?
-
-    JCFGBlock_t* root; //Main code start
-
-    //TODO: exception parsing
-    unsigned exceptions_count;
-    JCFGException_t* exceptions;
-    //========================
-
-
-    JCodeAttribute_t* bytecode;
-}JMethodCompiler_t;
+    JSymbolType_t type;
+    uint32_t index;
+    void* value;
+}JSymbol_t;
 
 typedef struct{
-    JMethodCompiler_t* compiler; //One per method
-    void* code;
+    bump_allocator_t* arena;
+    hashmap_t symmap;
+    uint32_t cur_symindex;
+}JSymbolTable_t;
 
-}JCompiledMethod_t;
+typedef struct{
+    bump_allocator_t* arena;
 
-//TODO: proper compiler init function!
-
-JError_t JCFG_generate(JMethodCompiler_t* compiler, JCFGBlock_t** block_output, unsigned start_pc);
-void JCFG_test(JCFGBlock_t* root);
+    JLinker_t* linker;
+    JSymbolTable_t symtab;
+}JCompiler_t;

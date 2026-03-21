@@ -1,10 +1,8 @@
 #pragma once
 
 #include <stdint.h>
-#include <stdlib.h>
 #include "bumper.h"
 #include "loader.h"
-#include "class.h"
 
 //I plan to implement simple compiler for xtensa lx7 (esp32s3)
 //I dont think this project will be run on any other platform
@@ -20,20 +18,38 @@ typedef enum{
     EJCFGBT_END, //This block just ended, dont try to link something after it
 }JCFGBlockType_t;
 
-typedef struct JCFGBlock_t JCFGBlock_t;
+typedef struct{
+    uint16_t stack_bitmap_size; 
+    uint16_t locals_bitmap_size;
+
+    uint16_t stack_size; //SP at the time of snapshot. (used as SP in stackmap generator!)
+    uint16_t locals_size; //max_locals from bytecode
+
+    uint8_t* stack_bitmap;
+    uint8_t* locals_bitmap;
+}JCFGBlockTypeInfo_t;
+
 typedef struct JCFGBlock_t{
-    unsigned children_count;
+    uint8_t children_count; //uint8_t should more than enough
     JCFGBlock_t** children;
 
     JCFGBlockType_t type;
     uint32_t start_pc, end_pc;
 
+    JCFGBlockTypeInfo_t in_state;
+    JCFGBlockTypeInfo_t out_state;
+    JCFGBlockTypeInfo_t safepoint_state;
+
     union{
         uint8_t flags;
         struct{
-            unsigned generated:1;
+            unsigned is_in_state_initialised:1;
+            unsigned is_exception:1;
         };
     }flags;
+
+    uint8_t visit_id;
+    void* custom_data; //Will be used for compiler data
 }JCFGBlock_t;
 
 typedef struct JCFGException_t{
@@ -42,7 +58,10 @@ typedef struct JCFGException_t{
     uint16_t catch_type; 
 }JCFGException_t;
 
+typedef struct JClass_t JClass_t;
+typedef struct JMethod_t JMethod_t;
 typedef struct{
+    JMethod_t* method;
     bump_allocator_t* arena;
     JCFGBlock_t* root;
     
@@ -56,6 +75,7 @@ typedef struct{
 
     JCodeAttribute_t* bytecode;
 }JCFG_t;
+extern uint8_t opcode_sizes[256];
 
-JError_t JCFG_init(JCFG_t* cfg, JCodeAttribute_t* bytecode, bump_allocator_t* arena);
+JError_t JCFG_init(JCFG_t* cfg, JCodeAttribute_t* bytecode,JMethod_t* method, bump_allocator_t* arena);
 JError_t JCFG_build(JCFG_t* cfg);

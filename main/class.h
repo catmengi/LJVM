@@ -1,4 +1,5 @@
 #pragma once
+#include "cfg.h"
 #include "loader.h"
 
 typedef enum{
@@ -14,12 +15,6 @@ typedef enum{
     EJVT_VOID = 'V',
 }JValueType_t;
 typedef struct JClass_t JClass_t;
-
-typedef struct{
-    JClass_t* should_implement;
-    char* name;
-}JInterfaceMethodRef_t; //I think i would implement default methods in my JVM.... But i dont think someone
-                        //will be able to use them
 
 typedef struct{
     char* name; //This name is not java's raw name, it is name@description
@@ -44,9 +39,11 @@ typedef struct{
 typedef struct{
     JValueType_t return_type;
     JValueType_t* argument_types;
-    unsigned arguments_count;
+    uint8_t arguments_count;
 }JMethodPrototype_t;
-typedef struct{
+
+#include "cfg.h"
+typedef struct JMethod_t{
     char* name; //This name is not java's raw name, it is name@description
     uint16_t vtable_index;
 
@@ -56,7 +53,6 @@ typedef struct{
     union{
         uint32_t flags;
         struct{
-            bool is_staticlinked:1; //This is for linker internal purposes
             bool is_set:1; //This is for internal linker purposes
             bool is_static:1;
             bool is_native:1;
@@ -65,7 +61,9 @@ typedef struct{
         };
     }flags;
 
-    void* method_info; //Method info, either JCompiledCode_t or native method stuff
+    //Thoose fields are only valid when method is not native!
+    JCodeAttribute_t* code;
+    JCFG_t cfg; 
 }JMethod_t;
 
 typedef struct{
@@ -82,7 +80,7 @@ typedef struct JLinker_t JLinker_t;
 
 enum{
     EJRCT_NULL, //nothinh
-    EJRCT_STRING, //TODO
+    EJRCT_STRING, //JRawUTF8_t*
     EJRCT_INT, //uint32_t*
     EJRCT_LONG, //uint64_t*
     EJRCT_FLOAT, //float*
@@ -90,8 +88,7 @@ enum{
     EJRCT_CLASS, //JClass_t*
     EJRCT_FIELD, //JField_t*
     EJRCT_METHOD, //JMethod_t*
-    EJRCT_METHODREF, //uint16_t*
-    EJRCT_INTERFACEMETHODREF, //JInterfaceMethodRef_t;
+    EJRCT_INTERFACEMETHODREF, //JMethod_t*
 };
 
 typedef struct JClass_t{
@@ -112,12 +109,12 @@ typedef struct JClass_t{
     }flags;
     
     struct{
-        unsigned count;
+        uint16_t count;
         JClass_t** implement;
     }interfaces;
 
     struct{
-        unsigned size;
+        uint16_t size;
         struct{
             void* value;
             uint8_t type;
