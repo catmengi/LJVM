@@ -91,6 +91,17 @@ enum{
     EJRCT_INTERFACEMETHODREF, //JMethod_t*
 };
 
+typedef struct{
+    uint16_t class_index; //Class index is index from raw class file!
+    uint16_t symbol_type;
+    void* value;
+}JClassSymbol_t;
+
+typedef struct{
+    uint16_t length;
+    JClassSymbol_t* symbols;
+}JClassSymtab_t;
+
 typedef struct JClass_t{
     struct list_head list; //Used to store class in class_list of linker.
     struct list_head as_child; //Used to store class in child_list of parent. 
@@ -113,14 +124,8 @@ typedef struct JClass_t{
         JClass_t** implement;
     }interfaces;
 
-    struct{
-        uint16_t size;
-        struct{
-            void* value;
-            uint8_t type;
-        }*constants;
-    }constantpool;
 
+    JClassSymtab_t symtab; //Constant pool but eats less memory!
     JMethodTable_t vtable; //Vtable for instance methods
     JFieldTable_t fields[2]; //0: instance fields, 1: static fields. Will be used for GC scanning
     size_t ifields_size; //Ammount of memory required for ifields of this object
@@ -128,3 +133,6 @@ typedef struct JClass_t{
 
     void* metadata;
 }JClass_t;
+
+//Class index is index from raw class file!
+JClassSymbol_t* JClassSymtab_get_symbol(JClassSymtab_t* symtab, uint16_t class_index);

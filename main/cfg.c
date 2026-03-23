@@ -484,19 +484,6 @@ static JCFGBlock_t* find_cfg_block(JCFG_t* cfg, uint32_t start_pc){
     return found ? *found : NULL;
 }
 
-static unsigned count_throws_by_block(JCFG_t* cfg, JCFGBlock_t* block){
-    JCodeAttribute_t* code = cfg->bytecode;
-    unsigned retval = 0;
-    for(unsigned i = 0; i < code->exception_table_length; i++){
-        typeof(code->exception_table[0])* exception = &code->exception_table[i];
-        if(exception->start_pc == block->start_pc && exception->end_pc == block->end_pc){
-            retval++;
-        }
-    }
-
-    return retval;
-}
-
 static JError_t build_graph(JCFG_t* cfg){
     JError_t err = JERR_OK;
 
@@ -814,7 +801,9 @@ static JError_t create_stackmap(JCFG_t* cfg){
 
     STACK_PUSH(&worklist,cfg->root); //We need to manually push root block
     JCFGBlock_t* cur_block = NULL;
-    
+    JClassSymtab_t* symtab = &method->owner->symtab;
+
+
 start:
     while((cur_block = (void*)STACK_POP(&worklist))){
         JCFGBlockTypeInfo_t* out_state = &cur_block->out_state;
@@ -991,10 +980,10 @@ start:
 
                 case EJOPCODE_GETFIELD:{
                     uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
-                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, field_index);
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JField_t* field = symbol->value;
 
-                    JField_t* field = method->owner->constantpool.constants[field_index].value;
                     switch(field->type){
                         default:
                             PUSH(stack_bitmap,sp,0);
@@ -1015,9 +1004,10 @@ start:
                 break;
                 case EJOPCODE_GETSTATIC:{
                     uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, field_index);
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JField_t* field = symbol->value;
 
-                    JField_t* field = method->owner->constantpool.constants[field_index].value;
                     switch(field->type){
                         default:
                             PUSH(stack_bitmap,sp,0);
@@ -1038,9 +1028,10 @@ start:
 
                 case EJOPCODE_PUTFIELD:{
                     uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, field_index);
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JField_t* field = symbol->value;
 
-                    JField_t* field = method->owner->constantpool.constants[field_index].value;
                     switch(field->type){
                         default:
                             FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
@@ -1062,9 +1053,10 @@ start:
                 break;
                 case EJOPCODE_PUTSTATIC:{
                     uint16_t field_index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    FAIL_SET_JUMP(method->owner->constantpool.constants[field_index].type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, field_index);
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_FIELD,err,JERR_BADPARAM,exit);
+                    JField_t* field = symbol->value;
 
-                    JField_t* field = method->owner->constantpool.constants[field_index].value;
                     switch(field->type){
                         default:
                             FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
@@ -1126,9 +1118,9 @@ start:
 
                 case EJOPCODE_LDC_W:{
                     uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
 
-                    switch(constant->type){
+                    switch(symbol->symbol_type){
                         case EJRCT_CLASS:
                         case EJRCT_STRING:
                             PUSH(stack_bitmap,sp,1);
@@ -1144,9 +1136,9 @@ start:
                 break;
                 case EJOPCODE_LDC:{
                     uint8_t index = *(opcode + 1);
-                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
 
-                    switch(constant->type){
+                    switch(symbol->symbol_type){
                         case EJRCT_CLASS:
                         case EJRCT_STRING:
                             PUSH(stack_bitmap,sp,1);
@@ -1166,10 +1158,10 @@ start:
                 case EJOPCODE_INVOKESTATIC:
                 case EJOPCODE_INVOKESPECIAL:{
                     uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
-                    typeof(method->owner->constantpool.constants) constant = &method->owner->constantpool.constants[index];
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
 
-                    FAIL_SET_JUMP(constant->type == EJRCT_METHOD,err,JERR_BADPARAM,exit);
-                    JMethod_t* method = constant->value;
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_METHOD,err,JERR_BADPARAM,exit);
+                    JMethod_t* method = symbol->value;
                     
                     for(unsigned i = method->prototype.arguments_count; i-- > 0;){
                         switch(method->prototype.argument_types[i]){

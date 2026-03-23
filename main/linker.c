@@ -51,6 +51,128 @@ static size_t value_sizeof(JValueType_t type){
     return 0;
 }
 
+static int JClassSymbol_cmp(const void* a, const void* b){
+    const JClassSymbol_t* sym_a = a;
+    const JClassSymbol_t* sym_b = b;
+
+    return sym_a->class_index - sym_b->class_index;
+}
+
+static JError_t JClassSymtab_init(JClassSymtab_t* symtab, JRawClass_t* description, bump_allocator_t* arena){
+    JError_t err = JERR_OK;
+
+    FAIL_SET_JUMP(symtab && description && arena,err,JERR_BADPARAM,exit);
+    JConstantPool_t* cp = &description->constantpool;
+
+    unsigned symtab_length = 0;
+    for(unsigned i = 1; i < cp->count; i++){
+        JConstant_t* constant = JConstantPool_get(cp, i);
+        switch(constant->type){
+            default: break;
+
+            case EJCT_CLASS:
+            case EJCT_STRING:
+            case EJCT_LONG:
+            case EJCT_DOUBLE:
+            case EJCT_INT:
+            case EJCT_FLOAT:
+            case EJCT_FIELDREF:
+            case EJCT_METHODREF:
+            case EJCT_INTERFACE_METHODREF:
+                symtab_length++;
+                break;
+        }
+    }
+
+    symtab->length = symtab_length;
+    FAIL_SET_JUMP(((symtab->symbols = bumper_calloc(arena,symtab_length,sizeof(*symtab->symbols)))),err,JERR_OOM,exit);
+
+    uint16_t sym_i = 0;
+    for(unsigned i = 1; i < cp->count; i++){
+        JConstant_t* constant = JConstantPool_get(cp, i);
+        switch(constant->type){
+            default: break;
+
+            case EJCT_CLASS:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_CLASS;
+            }
+            break;
+
+            case EJCT_STRING:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_STRING;
+            }
+            break;
+
+            case EJCT_LONG:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i++; //Skip next entry
+                symbol->symbol_type = EJRCT_LONG;
+            }
+            break;
+
+            case EJCT_DOUBLE:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i++;
+                symbol->symbol_type = EJRCT_DOUBLE;
+            }
+            break;
+
+            case EJCT_INT:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_INT;
+            }
+            break;
+
+            case EJCT_FLOAT:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_FLOAT;
+            }
+            break;
+
+            case EJCT_FIELDREF:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_FIELD;
+            }
+            break;
+
+            case EJCT_METHODREF:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_METHOD;
+            }
+            break;
+
+            case EJCT_INTERFACE_METHODREF:{
+                JClassSymbol_t* symbol = &symtab->symbols[sym_i++];
+                symbol->class_index = i;
+                symbol->symbol_type = EJRCT_INTERFACEMETHODREF;
+            }
+            break;
+        }
+    }
+
+    qsort(symtab->symbols,symtab->length,sizeof(*symtab->symbols),JClassSymbol_cmp);
+
+exit:
+    return err;
+} 
+
+//Class index is index from raw class file!
+JClassSymbol_t* JClassSymtab_get_symbol(JClassSymtab_t* symtab, uint16_t class_index){
+    JClassSymbol_t to_find = {
+        .class_index = class_index,
+    };
+
+    return bsearch(&to_find,symtab->symbols,symtab->length,sizeof(*symtab->symbols),JClassSymbol_cmp);
+}
+
 //This method will create class, lookup its name and add it to the linker hashtable
 //But it will not lookup its interface, lookup it constant pool and etc.
 static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
@@ -81,10 +203,8 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     class->name = (char*)name_utf8->string; //There is normal C string, except that it is in java encoding.....
 
 
-    //Allocate constant pool
-    class->constantpool.size = raw_class->constantpool.count;
-    class->constantpool.constants = bumper_calloc(linker->arena,class->constantpool.size,sizeof(*class->constantpool.constants));
-    FAIL_SET_JUMP(class->constantpool.constants,ret_val,NULL,exit);
+    //Allocate symtab
+    FAIL_SET_JUMP(JClassSymtab_init(&class->symtab,raw_class,linker->arena) == JERR_OK,ret_val,NULL,exit);
 
     //Allocate interfaces
     class->interfaces.count = raw_class->interfaces_count;
@@ -383,15 +503,20 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
     JError_t err = JERR_OK;
 
     JLinkerMetadata_t* metadata = class->metadata;
+    JClassSymtab_t* symtab = &class->symtab;
     JConstantPool_t* raw_constantpool = &metadata->raw_self->constantpool;
-    for(unsigned i = 1; i < raw_constantpool->count; i++){
-        JConstant_t* constant = JConstantPool_get(raw_constantpool, i);
-        switch(constant->type){
+    for(unsigned i = 0; i < symtab->length; i++){
+        JClassSymbol_t* cur_symbol = &symtab->symbols[i];
+        JConstant_t* constant = JConstantPool_get(raw_constantpool, cur_symbol->class_index);
+        switch(cur_symbol->symbol_type){
             default: break;
 
-            case EJCT_FIELDREF:{
+            case EJRCT_FIELD:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
-                JClass_t* field_class = class->constantpool.constants[fmim_ref->class_index].value;
+                JClassSymbol_t* class_symbol = JClassSymtab_get_symbol(&class->symtab, fmim_ref->class_index);
+                FAIL_SET_JUMP(class_symbol && class_symbol->symbol_type == EJRCT_CLASS && class_symbol->value != NULL, err,JERR_BADPARAM,exit);
+
+                JClass_t* field_class = class_symbol->value;
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -403,25 +528,22 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
-
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
-                                ({printf("Constant type isnt class for field: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
-                                ({printf("Constant type is class, but it is NULL for field: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
 
                 JLinkerMetadata_t* metadata = field_class->metadata;
 
                 JField_t* field = hashmap_get(&metadata->fields,mangled_name);
                 FAIL_SET_JUMP(field,err,JERR_NOTFOUND,exit);
 
-                class->constantpool.constants[i].type = EJRCT_FIELD;
-                class->constantpool.constants[i].value = field;
+                cur_symbol->value = field;
             }
             break;
 
-            case EJCT_METHODREF:{
+            case EJRCT_METHOD:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
-                JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
+                JClassSymbol_t* class_symbol = JClassSymtab_get_symbol(&class->symtab, fmim_ref->class_index);
+                FAIL_SET_JUMP(class_symbol && class_symbol->symbol_type == EJRCT_CLASS && class_symbol->value != NULL, err,JERR_BADPARAM,exit);
+
+                JClass_t* method_class = class_symbol->value;
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -434,24 +556,21 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
 
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
-                                ({printf("Constant type isnt class for method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
-                                ({printf("Constant type is class, but it is NULL for method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
-
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
                 JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
-                class->constantpool.constants[i].type = EJRCT_METHOD;
-                class->constantpool.constants[i].value = method;
+                cur_symbol->value = method;
             }
             break;
     
-            case EJCT_INTERFACE_METHODREF:{
+            case EJRCT_INTERFACEMETHODREF:{
                 JRaw_FMIM_ref_t* fmim_ref = constant->value;
-                JClass_t* method_class = class->constantpool.constants[fmim_ref->class_index].value;
+                JClassSymbol_t* class_symbol = JClassSymtab_get_symbol(&class->symtab, fmim_ref->class_index);
+                FAIL_SET_JUMP(class_symbol && class_symbol->symbol_type == EJRCT_CLASS && class_symbol->value != NULL, err,JERR_BADPARAM,exit);
+
+                JClass_t* method_class = class_symbol->value;
 
                 JRawNameAndType_t* nameandtype = JConstantPool_get(raw_constantpool, fmim_ref->nameandtype_index)->value;
 
@@ -464,31 +583,23 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
                 char mangled_name[strlen(name) + strlen(description) + 2];
                 sprintf(mangled_name,"%s@%s",name,description);
 
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].type == EJRCT_CLASS,err,
-                                ({printf("Constant type isnt class for interface method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
-                FAIL_SET_JUMP(class->constantpool.constants[fmim_ref->class_index].value,err,
-                                ({printf("Constant type is class, but it is NULL for interface method: %s\n",mangled_name); (JERR_BADPARAM);}),exit);
-
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
                 JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
-                class->constantpool.constants[i].type = EJRCT_INTERFACEMETHODREF;
-                class->constantpool.constants[i].value = method;
+                cur_symbol->value = method;
             }
             break;
 
-            case EJCT_STRING:{
-                class->constantpool.constants[i].type = EJRCT_STRING;
-                
+            case EJRCT_STRING:{
                 JRawString_t* raw_string = constant->value;
 
                 JConstant_t* utf8_const = JConstantPool_get(raw_constantpool, raw_string->utf8_index);
                 FAIL_SET_JUMP(utf8_const,err,JERR_NOTFOUND,exit);
                 JRawUTF8_t* utf8 = utf8_const->value;
             
-                class->constantpool.constants[i].value = utf8;
+                cur_symbol->value = utf8;
             }
             break;
         }
@@ -540,20 +651,20 @@ JError_t JLinker_link(JLinker_t* linker){
             new_class->flags.is_final = ((cur_raw->flags & ACC_FINAL) == ACC_FINAL);
             new_class->linker = linker;
 
-            for(unsigned i = 1; i < cur_raw->constantpool.count; i++){
-                JConstant_t* constant = JConstantPool_get(&cur_raw->constantpool,i);
+            
+            JClassSymtab_t* symtab = &new_class->symtab;
+            for(unsigned i = 0; i < symtab->length; i++){
+                JClassSymbol_t* cur_symbol = &symtab->symbols[i];
+                JConstant_t* constant = JConstantPool_get(&cur_raw->constantpool,cur_symbol->class_index);
                 switch(constant->type){
-                    case EJCT_INT:
-                    case EJCT_FLOAT:
-                        new_class->constantpool.constants[i].type = constant->type == EJCT_INT ? EJRCT_INT : EJRCT_FLOAT;
-                        new_class->constantpool.constants[i].value = constant->value;
+                    case EJRCT_INT:
+                    case EJRCT_FLOAT:
+                        cur_symbol->value = constant->value;
                     break;
 
-                    case EJCT_LONG:
-                    case EJCT_DOUBLE:
-                        new_class->constantpool.constants[i].type = constant->type == EJCT_LONG ? EJRCT_LONG : EJRCT_DOUBLE;
-                        new_class->constantpool.constants[i].value = constant->value;
-                        i++;
+                    case EJRCT_LONG:
+                    case EJRCT_DOUBLE:
+                        cur_symbol->value = constant->value;
                     break;
 
 
@@ -592,9 +703,11 @@ JError_t JLinker_link(JLinker_t* linker){
             list_add(&cur_class->as_child,&parent->children);
         }
 
-        for(unsigned i = 1; i < description->constantpool.count; i++){
-            JConstant_t* constant = JConstantPool_get(&description->constantpool, i);
-            if(constant->type != EJCT_CLASS) continue;
+        JClassSymtab_t* symtab = &cur_class->symtab;
+        for(unsigned i = 0; i < symtab->length; i++){
+            JClassSymbol_t* cur_symbol = &symtab->symbols[i];
+            JConstant_t* constant = JConstantPool_get(&description->constantpool, cur_symbol->class_index);
+            if(cur_symbol->symbol_type != EJRCT_CLASS) continue;
             
             JConstant_t* JC_class_name = JConstantPool_get(&description->constantpool, *(uint16_t*)constant->value);
             FAIL_SET_JUMP(JC_class_name && JC_class_name->type == EJCT_UTF8, err, JERR_BADPARAM,exit);
@@ -634,8 +747,7 @@ JError_t JLinker_link(JLinker_t* linker){
             }
             FAIL_SET_JUMP(refered_class,err,({printf("Cannot find class: %s\n",class_name);(JERR_NOTFOUND);}),exit);
 
-            cur_class->constantpool.constants[i].type = EJRCT_CLASS;
-            cur_class->constantpool.constants[i].value = refered_class; //Add this class to constantpool
+            cur_symbol->value = refered_class; //Add this class to constantpool
         }
 
         for(unsigned i = 0; i < description->interfaces_count; i++){
