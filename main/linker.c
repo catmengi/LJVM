@@ -173,6 +173,11 @@ JClassSymbol_t* JClassSymtab_get_symbol(JClassSymtab_t* symtab, uint16_t class_i
     return bsearch(&to_find,symtab->symbols,symtab->length,sizeof(*symtab->symbols),JClassSymbol_cmp);
 }
 
+unsigned JClassSymtab_indexof(JClassSymtab_t* symtab, JClassSymbol_t* symbol){
+    assert(symbol);
+    return symbol - symtab->symbols;
+}
+
 //This method will create class, lookup its name and add it to the linker hashtable
 //But it will not lookup its interface, lookup it constant pool and etc.
 static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
@@ -624,8 +629,10 @@ static JError_t compile_class(JLinker_t* linker, JClass_t* class, bump_allocator
     hashmap_entry_t* cur_entry = NULL;
     while((cur_entry = hashmap_iterator_next(&method_iter))){
         JMethod_t* method = cur_entry->value;
-        FAIL_SET_JUMP((err = JCFG_init(&method->cfg,method->code,method,linker->arena)) == JERR_OK,err,err,exit);
-        FAIL_SET_JUMP((err = JCFG_build(&method->cfg)) == JERR_OK,err,err,exit);
+        if(!method->flags.is_native){
+            FAIL_SET_JUMP((err = JCFG_init(&method->cfg,method->code,method,linker->arena)) == JERR_OK,err,err,exit);
+            FAIL_SET_JUMP((err = JCFG_build(&method->cfg)) == JERR_OK,err,err,exit);
+        }
     }
 
     //TODO: reset arena

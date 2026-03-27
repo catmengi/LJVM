@@ -778,6 +778,19 @@ static JError_t create_stackmap(JCFG_t* cfg){
     JMethod_t* method = cfg->method;
     unsigned is_instance = !method->flags.is_static;
 
+    //Algorithm for stackmap generation!
+        //Pop from worklist to current_block
+        //Set out_state to &current_block.out_state
+        //Build out_state (if pc + opcode_size == cur_block->end_pc) swap out_state to temporary one ***or snaphot it to safepoint_state***
+        //Iterate children blocks
+            //If children_block.in_state != out_state
+                //meet(in_state, out_state)
+                //push children_block into worklist
+        //Iterate exception blocks
+            //If exception_block.in_state(locals) != out_state(locals)
+                //meet (in_state(locals),out_state(locals))
+                //push exception_block into worklist
+
     if(is_instance) SET_REF(cfg->root->in_state.locals_bitmap,0);
     for(unsigned i = is_instance; i < method->prototype.arguments_count + is_instance; i++){
         if(method->prototype.argument_types[i - is_instance] == EJVT_REFERENCE){
@@ -785,26 +798,11 @@ static JError_t create_stackmap(JCFG_t* cfg){
         }
     }
 
-    uint8_t exception_dedup_tag = 0xFF;
-    for(unsigned i = 0; i < cfg->exceptions_count; i++){
-        JCFGException_t* exception = &cfg->exceptions[i];
-        JCFGBlock_t* handler = exception->handler;
-
-        if(handler->visit_id != exception_dedup_tag){
-            handler->visit_id = exception_dedup_tag;
-
-            //Conservative GC for exception handlers is planned
-            memset(handler->in_state.locals_bitmap,1,handler->in_state.locals_bitmap_size);
-            STACK_PUSH(&worklist,handler);
-        } 
-    }
-
     STACK_PUSH(&worklist,cfg->root); //We need to manually push root block
     JCFGBlock_t* cur_block = NULL;
     JClassSymtab_t* symtab = &method->owner->symtab;
 
 
-start:
     while((cur_block = (void*)STACK_POP(&worklist))){
         JCFGBlockTypeInfo_t* out_state = &cur_block->out_state;
         JCFGBlockTypeInfo_t* safepoint_state = &cur_block->safepoint_state;
@@ -1095,21 +1093,21 @@ start:
                 case EJOPCODE_ARETURN:
                 case EJOPCODE_ATHROW:
                     FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
-                    goto start;
+                    goto next_block;
 
                 case EJOPCODE_RETURN:
-                    goto start;
+                    goto next_block;
 
                 case EJOPCODE_IRETURN:
                 case EJOPCODE_FRETURN:
                     FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
-                    goto start;
+                    goto next_block;
 
                 case EJOPCODE_LRETURN:
                 case EJOPCODE_DRETURN:
                     FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
                     FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0,err,JERR_BADPARAM,exit);
-                    goto start;
+                    goto next_block;
 
                 case EJOPCODE_LDC2_W:
                     PUSH(stack_bitmap,sp,0);
@@ -1205,10 +1203,357 @@ start:
                 }
                 break;
 
-                //TODO: other opcodes handling
+                case EJOPCODE_INSTANCEOF:{
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1,err,JERR_BADPARAM,exit);
+                    PUSH(stack_bitmap,sp,0);
+                }
+                break;
+
+                case EJOPCODE_POP:
+                    POP(stack_bitmap,sp);
+                    break;
+                case EJOPCODE_POP2:
+                    POP(stack_bitmap,sp);
+                    POP(stack_bitmap,sp);
+                    break;
+
+                case EJOPCODE_AALOAD:
+                case EJOPCODE_BALOAD:
+                case EJOPCODE_CALOAD:
+                case EJOPCODE_SALOAD:
+                case EJOPCODE_IALOAD:
+                case EJOPCODE_FALOAD:
+                case EJOPCODE_LALOAD:
+                case EJOPCODE_DALOAD:{
+                    bool is_dword = *opcode == EJOPCODE_DALOAD || *opcode == EJOPCODE_LALOAD;
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0, err, JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1, err, JERR_BADPARAM,exit);
+
+                    for(unsigned i = 0; i < is_dword + 1; i++)
+                        PUSH(stack_bitmap,sp,(*opcode == EJOPCODE_AALOAD));
+                }
+                break;
+
+                case EJOPCODE_AASTORE:
+                case EJOPCODE_BASTORE:
+                case EJOPCODE_CASTORE:
+                case EJOPCODE_SASTORE:
+                case EJOPCODE_IASTORE:
+                case EJOPCODE_FASTORE:
+                case EJOPCODE_LASTORE:
+                case EJOPCODE_DASTORE:{
+                    bool is_dword = *opcode == EJOPCODE_DASTORE || *opcode == EJOPCODE_LASTORE;
+                    for(unsigned i = 0; i < is_dword + 1; i++)
+                        FAIL_SET_JUMP(POP(stack_bitmap,sp) == (*opcode == EJOPCODE_AASTORE),err,JERR_BADPARAM,exit);
+
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 0, err, JERR_BADPARAM,exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap,sp) == 1, err, JERR_BADPARAM,exit);
+                }
+                break;
+
+                case EJOPCODE_NOP:
+                break;
+
+                case EJOPCODE_DUP: {
+                    uint16_t top = *sp - 1;
+                    uint8_t ref = IS_REF(stack_bitmap, top);
+                    PUSH(stack_bitmap, sp, ref);
+                    break;
+                }
+                case EJOPCODE_DUP_X1: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    (*sp) -= 2;
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    PUSH(stack_bitmap, sp, ref_second);
+                    break;
+                }
+                case EJOPCODE_DUP_X2: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint16_t third = second - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    uint8_t ref_third = IS_REF(stack_bitmap, third);
+                    (*sp) -= 3;
+                    PUSH(stack_bitmap, sp, ref_third);
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    PUSH(stack_bitmap, sp, ref_third);
+                    break;
+                }
+                case EJOPCODE_DUP2: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    break;
+                }
+                case EJOPCODE_DUP2_X1: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint16_t third = second - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    uint8_t ref_third = IS_REF(stack_bitmap, third);
+                    (*sp) -= 3;
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    PUSH(stack_bitmap, sp, ref_third);
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    break;
+                }
+                case EJOPCODE_DUP2_X2: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint16_t third = second - 1;
+                    uint16_t fourth = third - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    uint8_t ref_third = IS_REF(stack_bitmap, third);
+                    uint8_t ref_fourth = IS_REF(stack_bitmap, fourth);
+                    (*sp) -= 4;
+                    PUSH(stack_bitmap, sp, ref_third);
+                    PUSH(stack_bitmap, sp, ref_fourth);
+                    PUSH(stack_bitmap, sp, ref_top);
+                    PUSH(stack_bitmap, sp, ref_second);
+                    PUSH(stack_bitmap, sp, ref_third);
+                    PUSH(stack_bitmap, sp, ref_fourth);
+                    break;
+                }
+                case EJOPCODE_SWAP: {
+                    uint16_t top = *sp - 1;
+                    uint16_t second = top - 1;
+                    uint8_t ref_top = IS_REF(stack_bitmap, top);
+                    uint8_t ref_second = IS_REF(stack_bitmap, second);
+                    if (ref_top) SET_REF(stack_bitmap, second);
+                    else CLEAR_REF(stack_bitmap, second);
+                    if (ref_second) SET_REF(stack_bitmap, top);
+                    else CLEAR_REF(stack_bitmap, top);
+                    break;
+                }
+
+                case EJOPCODE_INEG:
+                case EJOPCODE_LNEG:
+                case EJOPCODE_FNEG:
+                case EJOPCODE_DNEG:
+                    break;
+
+                case EJOPCODE_ISHL:
+                case EJOPCODE_ISHR:
+                case EJOPCODE_IUSHR:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+                case EJOPCODE_LSHL:
+                case EJOPCODE_LSHR:
+                case EJOPCODE_LUSHR:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+
+                case EJOPCODE_IAND:
+                case EJOPCODE_IOR:
+                case EJOPCODE_IXOR:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+                case EJOPCODE_LAND:
+                case EJOPCODE_LOR:
+                case EJOPCODE_LXOR:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+
+                case EJOPCODE_LCMP:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+                case EJOPCODE_FCMPL:
+                case EJOPCODE_FCMPG:
+                case EJOPCODE_DCMPL:
+                case EJOPCODE_DCMPG:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+
+                case EJOPCODE_I2L:
+                case EJOPCODE_I2F:
+                case EJOPCODE_I2D:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    if (*opcode == EJOPCODE_I2L || *opcode == EJOPCODE_I2D) {
+                        PUSH(stack_bitmap, sp, 0);
+                        PUSH(stack_bitmap, sp, 0);
+                    } else {
+                        PUSH(stack_bitmap, sp, 0);
+                    }
+                    break;
+                case EJOPCODE_L2I:
+                case EJOPCODE_L2F:
+                case EJOPCODE_L2D:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    if (*opcode == EJOPCODE_L2D) {
+                        PUSH(stack_bitmap, sp, 0);
+                        PUSH(stack_bitmap, sp, 0);
+                    } else {
+                        PUSH(stack_bitmap, sp, 0);
+                    }
+                    break;
+                case EJOPCODE_F2I:
+                case EJOPCODE_F2L:
+                case EJOPCODE_F2D:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    if (*opcode == EJOPCODE_F2L || *opcode == EJOPCODE_F2D) {
+                        PUSH(stack_bitmap, sp, 0);
+                        PUSH(stack_bitmap, sp, 0);
+                    } else {
+                        PUSH(stack_bitmap, sp, 0);
+                    }
+                    break;
+                case EJOPCODE_D2I:
+                case EJOPCODE_D2L:
+                case EJOPCODE_D2F:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    if (*opcode == EJOPCODE_D2L) {
+                        PUSH(stack_bitmap, sp, 0);
+                        PUSH(stack_bitmap, sp, 0);
+                    } else {
+                        PUSH(stack_bitmap, sp, 0);
+                    }
+                    break;
+                case EJOPCODE_I2B:
+                case EJOPCODE_I2C:
+                case EJOPCODE_I2S:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+
+                case EJOPCODE_ARRAYLENGTH:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 1, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 0);
+                    break;
+                case EJOPCODE_NEWARRAY:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 1);
+                    break;
+                case EJOPCODE_ANEWARRAY:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 1);
+                    break;
+                case EJOPCODE_MULTIANEWARRAY: {
+                    uint8_t dimensions = *(opcode + 3);
+                    for (unsigned i = 0; i < dimensions; i++) {
+                        FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                    }
+                    PUSH(stack_bitmap, sp, 1);
+                    break;
+                }
+                case EJOPCODE_NEW: {
+                    uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                    JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
+                    FAIL_SET_JUMP(symbol->symbol_type == EJRCT_CLASS, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 1);
+                    break;
+                }
+
+                case EJOPCODE_IINC:
+                    break;
+
+                case EJOPCODE_MONITORENTER:
+                case EJOPCODE_MONITOREXIT:
+                    FAIL_SET_JUMP(POP(stack_bitmap, sp) == 1, err, JERR_BADPARAM, exit);
+                    break;
+
+                case EJOPCODE_CHECKCAST: {
+                    uint8_t is_ref = POP(stack_bitmap, sp);
+                    FAIL_SET_JUMP(is_ref == 1, err, JERR_BADPARAM, exit);
+                    PUSH(stack_bitmap, sp, 1);
+                    break;
+                }
+
+                case EJOPCODE_WIDE: {
+                    uint8_t wide_opcode = code[pc + 1];
+                    switch (wide_opcode) {
+                        case EJOPCODE_ILOAD:
+                        case EJOPCODE_FLOAD:
+                        case EJOPCODE_ALOAD:
+                        case EJOPCODE_LLOAD:
+                        case EJOPCODE_DLOAD: {
+                            uint16_t index = be16_to_cpu(*(uint16_t*)&code[pc + 2]);
+                            if (wide_opcode == EJOPCODE_LLOAD || wide_opcode == EJOPCODE_DLOAD) {
+                                FAIL_SET_JUMP(IS_REF(locals_bitmap, index) == 0, err, JERR_BADPARAM, exit);
+                                FAIL_SET_JUMP(IS_REF(locals_bitmap, index + 1) == 0, err, JERR_BADPARAM, exit);
+                                PUSH(stack_bitmap, sp, 0);
+                                PUSH(stack_bitmap, sp, 0);
+                            } else if (wide_opcode == EJOPCODE_ALOAD) {
+                                FAIL_SET_JUMP(IS_REF(locals_bitmap, index) == 1, err, JERR_BADPARAM, exit);
+                                PUSH(stack_bitmap, sp, 1);
+                            } else {
+                                FAIL_SET_JUMP(IS_REF(locals_bitmap, index) == 0, err, JERR_BADPARAM, exit);
+                                PUSH(stack_bitmap, sp, 0);
+                            }
+                            pc += 4;
+                            continue;
+                        }
+                        case EJOPCODE_ISTORE:
+                        case EJOPCODE_FSTORE:
+                        case EJOPCODE_ASTORE:
+                        case EJOPCODE_LSTORE:
+                        case EJOPCODE_DSTORE: {
+                            uint16_t index = be16_to_cpu(*(uint16_t*)&code[pc + 2]);
+                            if (wide_opcode == EJOPCODE_LSTORE || wide_opcode == EJOPCODE_DSTORE) {
+                                FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                                FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                                CLEAR_REF(locals_bitmap, index);
+                                CLEAR_REF(locals_bitmap, index + 1);
+                            } else if (wide_opcode == EJOPCODE_ASTORE) {
+                                FAIL_SET_JUMP(POP(stack_bitmap, sp) == 1, err, JERR_BADPARAM, exit);
+                                SET_REF(locals_bitmap, index);
+                            } else {
+                                FAIL_SET_JUMP(POP(stack_bitmap, sp) == 0, err, JERR_BADPARAM, exit);
+                                CLEAR_REF(locals_bitmap, index);
+                            }
+                            pc += 4;
+                            continue;
+                        }
+                        case EJOPCODE_IINC:
+                            pc += 6;
+                            continue;
+                        case EJOPCODE_RET:
+                            pc += 4;
+                            continue;
+                        default:
+                            err = JERR_BADPARAM;
+                            goto exit;
+                    }
+                    break;
+                }
             }
         }
 
+    next_block:
         for(unsigned i = cur_block->children_count; i-- > 0;){
             JCFGBlock_t* child = cur_block->children[i];
             if(!child->flags.is_in_state_initialised){
@@ -1220,23 +1565,26 @@ start:
                 STACK_PUSH(&worklist,child);
             }
         }
+
+        for(unsigned i = 0; i < cfg->exceptions_count; i++){
+            JCFGException_t* exception = &cfg->exceptions[i];
+            if(!(cur_block->end_pc <= exception->start_pc || cur_block->start_pc >= exception->end_pc)){
+                JCFGBlock_t* handler = exception->handler;
+                if(!handler->flags.is_in_state_initialised){
+                    handler->flags.is_in_state_initialised = 1;
+                    FAIL_SET_JUMP(copy_states(&handler->in_state, out_state) == JERR_OK,err,JERR_UNKNOWN,exit);
+
+                    handler->in_state.stack_size = 0; //Reset stack
+                    memset(handler->in_state.stack_bitmap,0,handler->in_state.stack_bitmap_size); 
+
+                    PUSH(handler->in_state.stack_bitmap,&handler->in_state.stack_size,1); //Set one stack element(exception object)
+                } else if(!is_locals_equal(out_state,&handler->in_state)){
+                    meet_locals(&handler->in_state,out_state);
+                    STACK_PUSH(&worklist,handler);
+                }
+            }
+        }
     }
-
-    //Algorithm for stackmap generation!
-    //Will be something like this:
-        //Pop from worklist to current_block
-        //Set out_state to &current_block.out_state
-        //Build out_state (if pc + opcode_size == cur_block->end_pc) swap out_state to temporary one ***or snaphot it to safepoint_state***
-        //Iterate children blocks
-            //If children_block.in_state != out_state
-                //meet(in_state, out_state)
-                //push children_block into worklist
-        //Iterate exception blocks
-            //If exception_block.in_state(locals) != out_state(locals)
-                //meet (in_state(locals),out_state(locals))
-                //push exception_block into worklist
-
-
 exit:
     return err;
 }

@@ -93,7 +93,7 @@ enum{
 
 typedef struct{
     uint16_t class_index; //Class index is index from raw class file!
-    uint16_t symbol_type;
+    uint8_t symbol_type;
     void* value;
 }JClassSymbol_t;
 
@@ -129,10 +129,12 @@ typedef struct JClass_t{
     JMethodTable_t vtable; //Vtable for instance methods
     JFieldTable_t fields[2]; //0: instance fields, 1: static fields. Will be used for GC scanning
     size_t ifields_size; //Ammount of memory required for ifields of this object
-    //TODO: stackmap field if not native
 
     void* metadata;
 }JClass_t;
 
 //Class index is index from raw class file!
 JClassSymbol_t* JClassSymtab_get_symbol(JClassSymtab_t* symtab, uint16_t class_index);
+
+//Return index of symbol in symbol table
+unsigned JClassSymtab_indexof(JClassSymtab_t* symtab, JClassSymbol_t* symbol);
