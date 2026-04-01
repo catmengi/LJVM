@@ -1,4 +1,5 @@
 #include "linker.h"
+#include "compiler.h"
 #include "hashmap.h"
 #include "list.h"
 #include "loader.h"
@@ -618,32 +619,6 @@ exit:
     return err;
 }
 
-#define COMPILE_ARENA_SIZE 512 * 1024
-static JError_t compile_class(JLinker_t* linker, JClass_t* class, bump_allocator_t* arena){
-    JError_t err = JERR_OK;
-
-    JLinkerMetadata_t* metadata = class->metadata;
-    hashmap_iterator_t method_iter = {0};
-    hashmap_iterator_init(&metadata->methods, &method_iter);
-
-    hashmap_entry_t* cur_entry = NULL;
-    while((cur_entry = hashmap_iterator_next(&method_iter))){
-        JMethod_t* method = cur_entry->value;
-        if(!method->flags.is_native){
-            FAIL_SET_JUMP((err = JCFG_init(&method->cfg,method->code,method,linker->arena)) == JERR_OK,err,err,exit);
-            FAIL_SET_JUMP((err = JCFG_build(&method->cfg)) == JERR_OK,err,err,exit);
-        }
-    }
-
-    //TODO: reset arena
-    JClass_t* child = NULL;
-    list_for_each_entry(child,&class->children,as_child){
-        FAIL_SET_JUMP(compile_class(linker,child,arena) == JERR_OK,err,JERR_UNKNOWN,exit);
-    }
-exit:
-    return err;
-}
-
 JError_t JLinker_link(JLinker_t* linker){
     JError_t err = JERR_OK;
     JRawClass_t empty_description = {0}; //Array classes stub
@@ -779,14 +754,7 @@ JError_t JLinker_link(JLinker_t* linker){
     list_for_each_entry(cur_root,&linker->root_list,as_child){
         FAIL_SET_JUMP(link_class(linker,cur_root) == JERR_OK,err,JERR_UNKNOWN,exit);
     }
-
-    //Step 4 compilation (WIP)
-    //TODO: separate compilation arena!!!!!!
-    //TODO: compilation
-    list_for_each_entry(cur_root,&linker->root_list,as_child){
-        FAIL_SET_JUMP(compile_class(linker, cur_root, linker->arena) == JERR_OK,err,JERR_UNKNOWN,exit);
-    }
-
+    
 exit:
     linker->linker_global_data.linker_flags.is_firstlaunch = 0;
     return err;
