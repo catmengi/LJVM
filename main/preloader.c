@@ -102,7 +102,7 @@ unsigned char dummyI_class[] = {
 
 
 static PreloaderItem_t preload_classes[] = {
-    {dummy_java_lang_Object,sizeof(dummy_java_lang_Object)}, //java/lang/Object
+    {dummy_java_lang_Object,sizeof(dummy_java_lang_Object)},
     {dummy_class,sizeof(dummy_class)},
     {dummyI_class,sizeof(dummyI_class)},
 };

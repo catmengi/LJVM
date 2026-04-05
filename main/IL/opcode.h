@@ -1,23 +1,29 @@
 #pragma once
 
 
-//Offsets are calculated in BYTES
-//There are only 8 regpairs
-//For example regpair 0 is reg0 + reg 1
-//only 64bit opcodes(postfix 64) must use regpairs
+//Instruction memory is counted in WORDS, any jmp/branch accepts offset in WORDS. call address must be in WORDS
+//Offsets for LDR/STR/ALDR/ASTR are in BYTES 
 //Each regpair have 2 registers, eg REGPAIR_A have registers A, B
-//REGPAIR_B have register C, D, REGPAIR_C have register E,F. Each register are 4bit number
+//REGPAIR_B have register C, D, REGPAIR_C have register E,F. Each register represented in regpair as 4bit index into int32_t reg[16]
+//sIMM16/sIMM24 - means signed immediate value
+//IMM16/IMM24 - means unsigned immediate value
+
+//Память инструкций адресуется в СЛОВАХ, любая инструкция jmp/branch принимает смещение в СЛОВАХ, call инструкции требуют адреса в СЛОВАХ
+//Смещения для LDR/STR/ALDR/ASTR указываются в БАЙТАХ
+//Каждая регистровая пара адресует 2 регистра, например: REGPAIR_A: регистры A, B. REGPAIR_B: регистры C, D. REGPAIR_C: регистры E,F
+//sIMM16/sIMM24 - значит signed immediate число(+-)
+//sIMM16/sIMM24 - значит unsigned immediate число(+)
 typedef enum{
     EJIL_OPCODE_NOP = 0,
     EJIL_OPCODE_HALT = 10,
     
-    EJIL_OPCODE_LDR32,   //REGPAIR_A + sIMM16 :: A = MEM[B + IMM16]
-    EJIL_OPCODE_LDR16,   //REGPAIR_A + sIMM16 :: A = MEM[B + IMM16]
-    EJIL_OPCODE_LDR8,    //REGPAIR_A + sIMM16 :: A = MEM[B + IMM16]
+    EJIL_OPCODE_LDR32,   //REGPAIR_A + sIMM16 :: A = MEM[B + sIMM16]
+    EJIL_OPCODE_LDR16,   //REGPAIR_A + sIMM16 :: A = MEM[B + sIMM16]
+    EJIL_OPCODE_LDR8,    //REGPAIR_A + sIMM16 :: A = MEM[B + sIMM16]
 
-    EJIL_OPCODE_STR32,   //REGPAIR_A + sIMM16 :: MEM[B + IMM16] = A
-    EJIL_OPCODE_STR16,   //REGPAIR_A + sIMM16 :: MEM[B + IMM16] = A
-    EJIL_OPCODE_STR8,    //REGPAIR_A + sIMM16 :: MEM[B + IMM16] = A,
+    EJIL_OPCODE_STR32,   //REGPAIR_A + sIMM16 :: MEM[B + sIMM16] = A
+    EJIL_OPCODE_STR16,   //REGPAIR_A + sIMM16 :: MEM[B + sIMM16] = A
+    EJIL_OPCODE_STR8,    //REGPAIR_A + sIMM16 :: MEM[B + sIMM16] = A,
 
     EJIL_OPCODE_ALDR32,   //REGPAIR_A + REGPAIR_B :: A = MEM[B + C]
     EJIL_OPCODE_ALDR16,   //REGPAIR_A + REGPAIR_B :: A = MEM[B + C]
@@ -32,14 +38,14 @@ typedef enum{
     EJIL_OPCODE_MOVZ,    //REGPAIR_A :: A = 0
 
     EJIL_OPCODE_JMP,     //IMM24 :: PC += IMM24
-    EJIL_OPCODE_BRZ,     //REGPAIR_A, sIMM16 :: PC = A == 0 ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRNZ,    //REGPAIR_A, sIMM16 :: PC = A != 0 ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BREQ,    //REGPAIR_A, sIMM16 :: PC = A == B ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRNEQ,   //REGPAIR_A, sIMM16 :: PC = A != B ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRGT,    //REGPAIR_A, sIMM16 :: PC = A > B ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRLT,    //REGPAIR_A, sIMM16 :: PC = A < B ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRGTE,   //REGPAIR_A, sIMM16 :: PC = A >= B ? PC + IMM16 : PC + 1
-    EJIL_OPCODE_BRLTE,   //REGPAIR_A, sIMM16 :: PC = A <= B ? PC + IMM16 : PC + 1
+    EJIL_OPCODE_BRZ,     //REGPAIR_A, sIMM16 :: PC = A == 0 ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRNZ,    //REGPAIR_A, sIMM16 :: PC = A != 0 ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BREQ,    //REGPAIR_A, sIMM16 :: PC = A == B ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRNEQ,   //REGPAIR_A, sIMM16 :: PC = A != B ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRGT,    //REGPAIR_A, sIMM16 :: PC = A > B ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRLT,    //REGPAIR_A, sIMM16 :: PC = A < B ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRGTE,   //REGPAIR_A, sIMM16 :: PC = A >= B ? PC + sIMM16 : PC + 1
+    EJIL_OPCODE_BRLTE,   //REGPAIR_A, sIMM16 :: PC = A <= B ? PC + sIMM16 : PC + 1
 
     EJIL_OPCODE_CMPZ,    //REGPAIR_A :: A = B == 0
     EJIL_OPCODE_CMPNZ,   //REGPAIR_A :: A = B != 0
@@ -105,5 +111,10 @@ typedef enum{
     EJIL_OPCODE_RETVOID, // :: Return from method without retval
     EJIL_OPCODE_CALL,    //REGPAIR_A, REGPAIR_B :: Call method on address from reg A, passing argument from reg B(current frame) to reg C(invoked method frame) 
     EJIL_OPCODE_RET,     //REGPAIR_A :: register A - register where to take return value(in current frame), register B - register to write retval in caller frame
+
+    //EJIL_OPCODE_CALLVOID Вызывает метод по адресу из регистра A без передачи аргумента
+    //EJIL_OPCODE_RETVOID Возврата из метода БЕЗ возврата значения
+    //EJIL_OPCODE_CALL Вызывает метод адресу из регистра A, берет аргумент из регистра B и ложит его в регистр C вызваного метода
+    //EJIL_OPCODE_RET Возврата из метода со значением, возвращаемое число берется из регистра A и ложится в регистр B предыдущего(вызывающего) метода
 
 }JILOpcodes_t;
