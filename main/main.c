@@ -4,7 +4,6 @@
 #include "compiler.h"
 #include "linker.h"
 #include "preloader.h"
-#include "IL/exec.h"
 
 void app_main(){
     bump_allocator_t arena = {0};
