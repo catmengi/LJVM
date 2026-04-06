@@ -13,8 +13,21 @@
 #include <string.h>
 #include <assert.h>
 
-static void* linker_ht_arena_alloc(void* userctx, size_t size){
-    return bumper_alloc(userctx,size);
+static int bstable_JClass_cmp(const void* a, const void* b){
+    JClass_t* ca = *(void**)a;
+    JClass_t* cb = *(void**)b;
+
+    return strcmp(ca->name, cb->name);
+}
+
+static void* bstable_JClass_find(bstable_t* classes, const void* name){
+    JClass_t* class = &(JClass_t){
+        .name = (char*)name,
+    };
+
+    void* ret = bstable_find_raw(classes, &class);
+
+    return ret ? *(void**)ret : NULL;
 }
 
 int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
@@ -24,7 +37,7 @@ int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
     linker->linker_global_data.linker_flags.is_firstlaunch = 1;
 
     INIT_LIST_HEAD(&linker->class_list);
-    return hashmap_init(&linker->class_map,32,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena);
+    return bstable_init(&linker->class_map, linker->arena, loader->num_loaded, bstable_JClass_cmp, bstable_JClass_find);
 }
 
 static size_t value_sizeof(JValueType_t type){
@@ -214,7 +227,7 @@ static void* bstable_JMethod_find(bstable_t* methods, const void* name){
     return ret ? *(void**)ret : NULL;
 }
 
-//This method will create class, lookup its name and add it to the linker hashtable
+//This method will create class, lookup its name and add it to the linker class bstable
 //But it will not lookup its interface, lookup it constant pool and etc.
 static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     void* ret_val = NULL;
@@ -229,7 +242,7 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     JRawUTF8_t* name_utf8 = sname_constant->value;
 
     //Create class
-    JClass_t* class = hashmap_get(&linker->class_map,(char*)name_utf8->string);
+    JClass_t* class = bstable_find(&linker->class_map,(char*)name_utf8->string);
     if(!class)
         class = bumper_calloc(linker->arena,1,sizeof(*class)); //Class does not exist, create new
     else goto exit;
@@ -263,7 +276,7 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
      FAIL_SET_JUMP(bstable_init(&metadata->methods, linker->arena, raw_class->methods_count, bstable_JMethod_cmp, bstable_JMethod_find) == 0,ret_val,NULL,exit);
     class->metadata = metadata;
 
-    FAIL_SET_JUMP(hashmap_set(&linker->class_map,class->name, class) == 0,ret_val,NULL,exit);
+    FAIL_SET_JUMP(bstable_insert(&linker->class_map, class) == 0,ret_val,NULL,exit);
     list_add(&class->list,&linker->class_list);
     ret_val = class;
 
@@ -730,7 +743,7 @@ JError_t JLinker_link(JLinker_t* linker){
 
             char* super_name_cstr = (char*)(((JRawUTF8_t*)super_name->value)->string);
 
-            JClass_t* parent = hashmap_get(&linker->class_map, super_name_cstr);
+            JClass_t* parent = bstable_find(&linker->class_map, super_name_cstr);
             FAIL_SET_JUMP(parent && !parent->flags.is_final,err,JERR_NOTFOUND,exit);
             //Parent found huray!
 
@@ -748,7 +761,7 @@ JError_t JLinker_link(JLinker_t* linker){
             FAIL_SET_JUMP(JC_class_name && JC_class_name->type == EJCT_UTF8, err, JERR_BADPARAM,exit);
 
             char* class_name = (char*)(((JRawUTF8_t*)JC_class_name->value)->string);
-            JClass_t* refered_class = hashmap_get(&linker->class_map, class_name);
+            JClass_t* refered_class = bstable_find(&linker->class_map, class_name);
             if(class_name[0] == '[' && refered_class == NULL && !cur_class->flags.is_initialised){ //This should work. At least temporary
                 JClass_t* array_class = bumper_calloc(linker->arena,1,sizeof(*array_class));
                 FAIL_SET_JUMP(array_class,err,JERR_OOM,exit);
@@ -758,7 +771,7 @@ JError_t JLinker_link(JLinker_t* linker){
                 INIT_LIST_HEAD(&array_class->list);
 
                 array_class->name = class_name;
-                array_class->parent = hashmap_get(&linker->class_map, "java/lang/Object");
+                array_class->parent = bstable_find(&linker->class_map, "java/lang/Object");
 
                 //TODO: interfaces
 
@@ -776,7 +789,7 @@ JError_t JLinker_link(JLinker_t* linker){
                 array_metadata->raw_self = &empty_description;
 
                 array_class->metadata = array_metadata;
-                FAIL_SET_JUMP(hashmap_set(&linker->class_map,class_name,array_class) == 0,err,JERR_OOM,exit);
+                FAIL_SET_JUMP(bstable_insert(&linker->class_map,array_class) == 0,err,JERR_OOM,exit);
 
                 refered_class = array_class;
             }
@@ -793,7 +806,7 @@ JError_t JLinker_link(JLinker_t* linker){
             FAIL_SET_JUMP(JC_class_name && JC_class_name->type == EJCT_UTF8, err, JERR_BADPARAM,exit);
 
             char* class_name = (char*)(((JRawUTF8_t*)JC_class_name->value)->string);
-            cur_class->interfaces.implement[i] = hashmap_get(&linker->class_map, class_name);
+            cur_class->interfaces.implement[i] = bstable_find(&linker->class_map, class_name);
         }
     }
 
@@ -814,7 +827,7 @@ exit:
 }
 
 JClass_t* JClass_get(JLinker_t* linker, char* class_name){
-    return linker && class_name ? hashmap_get(&linker->class_map,class_name) : NULL;
+    return linker && class_name ? bstable_find(&linker->class_map,class_name) : NULL;
 }
 
 //It requires MANGLED name. in name@description format!

@@ -9,7 +9,7 @@ typedef struct JLinker_t{
     bump_allocator_t* arena;
     JLoader_t* loader;
 
-    hashmap_t class_map;
+    bstable_t class_map;
     struct list_head class_list;
     struct list_head root_list;
 
@@ -27,8 +27,8 @@ typedef struct JLinker_t{
 
 typedef struct{
     JRawClass_t* raw_self;
-    bstable_t fields;
 
+    bstable_t fields; //It have ALL references to fields
     bstable_t methods; //It have ALL references to methods
     size_t methods_count[2]; //counter of all methods in class. 0 - instance methods, 1 - staticly linked
 
