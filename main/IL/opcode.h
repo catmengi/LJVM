@@ -37,7 +37,7 @@ typedef enum{
     EJIL_OPCODE_MOVI,    //REGPAIR_A + IMM16 :: A = IMM16
     EJIL_OPCODE_MOVZ,    //REGPAIR_A :: A = 0
 
-    EJIL_OPCODE_JMP,     //IMM24 :: PC += IMM24
+    EJIL_OPCODE_JMP,     //IMM24 :: PC += sIMM24
     EJIL_OPCODE_BRZ,     //REGPAIR_A, sIMM16 :: PC = A == 0 ? PC + sIMM16 : PC + 1
     EJIL_OPCODE_BRNZ,    //REGPAIR_A, sIMM16 :: PC = A != 0 ? PC + sIMM16 : PC + 1
     EJIL_OPCODE_BREQ,    //REGPAIR_A, sIMM16 :: PC = A == B ? PC + sIMM16 : PC + 1
