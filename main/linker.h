@@ -3,6 +3,7 @@
 #include "loader.h"
 #include "bumper.h"
 #include "hashmap.h"
+#include "bstable.h"
 
 typedef struct JLinker_t{
     bump_allocator_t* arena;
@@ -26,9 +27,9 @@ typedef struct JLinker_t{
 
 typedef struct{
     JRawClass_t* raw_self;
-    hashmap_t fields;
+    bstable_t fields;
 
-    hashmap_t methods; //It have ALL references to methods
+    bstable_t methods; //It have ALL references to methods
     size_t methods_count[2]; //counter of all methods in class. 0 - instance methods, 1 - staticly linked
 
     size_t ifield_curoffset; //This is the current offset for instance fields. 

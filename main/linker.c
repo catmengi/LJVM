@@ -7,6 +7,7 @@
 #include "bumper.h"
 #include "class.h"
 #include "cfg.h"
+#include "bstable.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -179,6 +180,40 @@ unsigned JClassSymtab_indexof(JClassSymtab_t* symtab, JClassSymbol_t* symbol){
     return symbol - symtab->symbols;
 }
 
+static int bstable_JField_cmp(const void* a, const void* b){
+    JField_t* fa = *(void**)a;
+    JField_t* fb = *(void**)b;
+
+    return strcmp(fa->name, fb->name);
+}
+
+static void* bstable_JField_find(bstable_t* fields, const void* name){
+    JField_t* field = &(JField_t){
+        .name = (char*)name,
+    };
+
+    void* ret = bstable_find_raw(fields, &field);
+
+    return ret ? *(void**)ret : NULL;
+}
+
+static int bstable_JMethod_cmp(const void* a, const void* b){
+    JMethod_t* ma = *(void**)a;
+    JMethod_t* mb = *(void**)b;
+
+    return strcmp(ma->name, mb->name);
+}
+
+static void* bstable_JMethod_find(bstable_t* methods, const void* name){
+    JMethod_t* method = &(JMethod_t){
+        .name = (char*)name,
+    };
+
+    void* ret = bstable_find_raw(methods, &method);
+
+    return ret ? *(void**)ret : NULL;
+}
+
 //This method will create class, lookup its name and add it to the linker hashtable
 //But it will not lookup its interface, lookup it constant pool and etc.
 static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
@@ -224,8 +259,8 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     metadata->ifield_curoffset = 0;
     metadata->raw_self = raw_class;
 
-    FAIL_SET_JUMP(hashmap_init(&metadata->fields,8,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena) == 0,ret_val,NULL,exit);
-    FAIL_SET_JUMP(hashmap_init(&metadata->methods,8,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena) == 0,ret_val,NULL,exit);
+    FAIL_SET_JUMP(bstable_init(&metadata->fields, linker->arena, raw_class->fields_count, bstable_JField_cmp, bstable_JField_find) == 0,ret_val,NULL,exit);
+     FAIL_SET_JUMP(bstable_init(&metadata->methods, linker->arena, raw_class->methods_count, bstable_JMethod_cmp, bstable_JMethod_find) == 0,ret_val,NULL,exit);
     class->metadata = metadata;
 
     FAIL_SET_JUMP(hashmap_set(&linker->class_map,class->name, class) == 0,ret_val,NULL,exit);
@@ -376,7 +411,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         field->flags.is_alligned = (field->offset % sizeof(uint32_t) == 0) && (field->type != EJVT_DOUBLE && field->type != EJVT_LONG);
         field->owner = class;
 
-        FAIL_SET_JUMP(hashmap_set(&metadata->fields, field->name, field) == 0, err, JERR_UNKNOWN, exit);
+        FAIL_SET_JUMP(bstable_insert(&metadata->fields, field) == 0, err, JERR_UNKNOWN, exit);
     }
 
     class->fields[0].fields = bumper_calloc(linker->arena,class->fields[0].count,sizeof(*class->fields[0].fields));
@@ -385,11 +420,17 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
     FAIL_SET_JUMP(class->fields[1].fields,err,JERR_OOM,exit);
 
     size_t field_index[2] = {0};
-    hashmap_iterator_t field_iter = {0};
+    /*hashmap_iterator_t field_iter = {0};
     hashmap_iterator_init(&metadata->fields,&field_iter);
     hashmap_entry_t* field_entry = NULL;
     while((field_entry = hashmap_iterator_next(&field_iter))){
         JField_t* field = field_entry->value;
+        class->fields[field->flags.is_static].fields[field_index[field->flags.is_static]++] = field;
+    }
+    */
+
+    for(unsigned i = 0; i < metadata->fields.count; i++){
+        JField_t* field = (void*)metadata->fields.elements[i];
         class->fields[field->flags.is_static].fields[field_index[field->flags.is_static]++] = field;
     }
 
@@ -440,7 +481,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         }
 
         metadata->methods_count[method->flags.is_static]++;
-        FAIL_SET_JUMP(hashmap_set(&metadata->methods,method->name,method) == 0,err,JERR_UNKNOWN,exit);
+        FAIL_SET_JUMP(bstable_insert(&metadata->methods,method) == 0,err,JERR_UNKNOWN,exit);
     }
 
     if(!is_interface){ //No reason to build vtable if this is an interface
@@ -448,7 +489,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         unsigned redefines_count = 0;
         for(unsigned i = 0; i < (class->parent ? class->parent->vtable.count : 0); i++){
-            JMethod_t* redefine_with = hashmap_get(&metadata->methods,class->parent->vtable.methods[i]->name);
+            JMethod_t* redefine_with = bstable_find(&metadata->methods,class->parent->vtable.methods[i]->name);
             if(redefine_with && !redefine_with->flags.is_static)
                 redefines_count++;
         }
@@ -467,7 +508,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             JMethod_t* method = new_vtable->methods[i];
             assert(!method->flags.is_static);
 
-            JMethod_t* override_with = hashmap_get(&metadata->methods,method->name);
+            JMethod_t* override_with = bstable_find(&metadata->methods,method->name);
             if(override_with){
                 FAIL_SET_JUMP(!method->flags.is_final,err,JERR_BADPARAM,exit);
                 new_vtable->methods[i] = override_with;
@@ -476,7 +517,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         }
 
         unsigned vtable_index = (class->parent ? class->parent->vtable.count : 0);
-        hashmap_iterator_t method_iter = {0};
+        /*hashmap_iterator_t method_iter = {0};
         hashmap_iterator_init(&metadata->methods, &method_iter);
 
         hashmap_entry_t* cur_entry = NULL;
@@ -491,6 +532,18 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             method->vtable_index = method_index;
         }
         new_vtable->count = vtable_index;
+        */
+
+        for(unsigned i = 0; i < metadata->methods.count; i++){
+            JMethod_t* method = (void*)metadata->methods.elements[i];
+            if(method->flags.is_set) continue;
+            if(method->flags.is_static) continue;
+
+            unsigned method_index = vtable_index++;
+
+            new_vtable->methods[method_index] = method;
+            method->vtable_index = method_index;
+        }
     }
     class->ifields_size = metadata->ifield_curoffset;
 
@@ -537,7 +590,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 JLinkerMetadata_t* metadata = field_class->metadata;
 
-                JField_t* field = hashmap_get(&metadata->fields,mangled_name);
+                JField_t* field = bstable_find(&metadata->fields,mangled_name);
                 FAIL_SET_JUMP(field,err,JERR_NOTFOUND,exit);
 
                 cur_symbol->value = field;
@@ -564,7 +617,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
-                JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
+                JMethod_t* method = bstable_find(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
                 cur_symbol->value = method;
@@ -591,7 +644,7 @@ static JError_t link_class(JLinker_t* linker, JClass_t* class){
 
                 JLinkerMetadata_t* metadata = method_class->metadata;
 
-                JMethod_t* method = hashmap_get(&metadata->methods,mangled_name);
+                JMethod_t* method = bstable_find(&metadata->methods,mangled_name);
                 FAIL_SET_JUMP(method,err,JERR_NOTFOUND,exit);
 
                 cur_symbol->value = method;
@@ -717,8 +770,8 @@ JError_t JLinker_link(JLinker_t* linker){
                 JLinkerMetadata_t* array_metadata = bumper_calloc(linker->arena,1,sizeof(*array_metadata));
                 FAIL_SET_JUMP(array_metadata,err,JERR_OOM,exit);
 
-                hashmap_init(&array_metadata->fields,1,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena);
-                hashmap_init(&array_metadata->methods,1,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena);
+                bstable_init(&array_metadata->fields,linker->arena,0,bstable_JField_cmp,bstable_JField_find);
+                bstable_init(&array_metadata->methods,linker->arena,0,bstable_JMethod_cmp,bstable_JMethod_find);
 
                 array_metadata->raw_self = &empty_description;
 
@@ -769,7 +822,7 @@ JMethod_t* JClass_get_method(JClass_t* class, char* method_name){
     JMethod_t* found = NULL;
     for(JClass_t* cur_class = class; cur_class; cur_class = cur_class->parent){
         JLinkerMetadata_t* class_metadata = cur_class->metadata;
-        found = hashmap_get(&class_metadata->methods, method_name);
+        found = bstable_find(&class_metadata->methods, method_name);
         if(found) break;
     }
     return found;
@@ -779,7 +832,7 @@ JField_t* JClass_get_field(JClass_t* class, char* field_name){
     JField_t* found = NULL;
     for(JClass_t* cur_class = class; cur_class; cur_class = cur_class->parent){
         JLinkerMetadata_t* class_metadata = cur_class->metadata;
-        found = hashmap_get(&class_metadata->fields,field_name);
+        found = bstable_find(&class_metadata->fields,field_name);
         if(found) break;
     }
     return found;    
