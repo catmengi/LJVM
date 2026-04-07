@@ -148,8 +148,6 @@ typedef enum{
 }JRawFlags_t;
 
 typedef struct{
-    size_t num_loaded;
-
     bump_allocator_t* arena;
     struct list_head classes;
 }JLoader_t;

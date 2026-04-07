@@ -11,7 +11,6 @@
 int JLoader_init(JLoader_t* loader, bump_allocator_t* arena){
     INIT_LIST_HEAD(&loader->classes);
     loader->arena = arena;
-    loader->num_loaded = 0;
 
     return 0;
 }
@@ -345,7 +344,6 @@ JError_t JLoader_load(JLoader_t* loader, memstream_t* stream){
         FAIL_SET_JUMP(parse_attributes(&new_class->attributes, new_class, loader->arena, stream) == JERR_OK,err,JERR_BADPARAM,exit);
     }
 
-    loader->num_loaded++;
     list_add(&new_class->list,&loader->classes);
 exit:
     return err;
