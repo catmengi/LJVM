@@ -17,6 +17,8 @@ typedef enum{
 typedef struct JClass_t JClass_t;
 
 typedef struct{
+    uint32_t ID;
+
     char* name; //This name is not java's raw name, it is name@description
     JClass_t* owner;
 
@@ -44,8 +46,11 @@ typedef struct{
 
 #include "cfg.h"
 typedef struct JMethod_t{
+    uint32_t ID;
+
     char* name; //This name is not java's raw name, it is name@description
-    uint16_t vtable_index;
+    uint16_t vtable_index; //valid when is_static == 0
+    uint16_t native_index; //valid when is_native != 0
 
     JClass_t* owner;
     JMethodPrototype_t prototype;
@@ -103,6 +108,8 @@ typedef struct{
 }JClassSymtab_t;
 
 typedef struct JClass_t{
+    uint32_t ID;
+
     struct list_head list; //Used to store class in class_list of linker.
     struct list_head as_child; //Used to store class in child_list of parent. 
     struct list_head children; //Used to store subclasses in it.
@@ -124,10 +131,8 @@ typedef struct JClass_t{
         JClass_t** implement;
     }interfaces;
 
-
     JClassSymtab_t symtab; //Constant pool but eats less memory!
     JMethodTable_t vtable; //Vtable for instance methods
-    JFieldTable_t fields[2]; //0: instance fields, 1: static fields. Will be used for GC scanning
     size_t ifields_size; //Ammount of memory required for ifields of this object
 
     void* metadata;

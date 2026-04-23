@@ -1,9 +1,14 @@
 #pragma once
+#include "cfg.h"
 #include "class.h"
 #include "loader.h"
 #include "bumper.h"
 #include "hashmap.h"
 #include "bstable.h"
+
+#define JFID_CLASS 0
+#define JFID_METHOD 1
+#define JFID_FIELD 2
 
 typedef struct JLinker_t{
     bump_allocator_t* arena;
@@ -13,6 +18,7 @@ typedef struct JLinker_t{
     struct list_head class_list;
     struct list_head root_list;
 
+
     struct{
         union{ //Runtime only flags
             uint16_t flags;
@@ -20,7 +26,8 @@ typedef struct JLinker_t{
                 bool is_firstlaunch:1;
             };
         }linker_flags;
-        size_t sfield_curoffset; //sue this field as the size
+        uint32_t ID_tracker[3]; //0 - classes, 1 - methods, 2 - fields; Store max id of each type
+        size_t sfield_curoffset; //use this field as the size
                                  //for allocating static field memory
     }linker_global_data;
 }JLinker_t;
@@ -31,12 +38,11 @@ typedef struct{
 
     bstable_t methods; //It have ALL references to methods
     size_t methods_count[2]; //counter of all methods in class. 0 - instance methods, 1 - staticly linked
+    size_t fields_count[2]; //Counter of all fields in class. 0 - instance methods, 1 - static
 
     size_t ifield_curoffset; //This is the current offset for instance fields. 
                              //It will be use like this: field->offset = ifield_curoffset; ifield_curoffset += (field size);
                              //And this is actually can (and most likely will) be used as class size for GC system
-    size_t ifield_count;
-    size_t sfield_count;
 }JLinkerMetadata_t;
 
 typedef struct{

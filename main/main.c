@@ -2,6 +2,7 @@
 #include "cfg.h"
 #include "class.h"
 #include "compiler.h"
+#include "jeex_builder.h"
 #include "linker.h"
 #include "preloader.h"
 
@@ -19,7 +20,6 @@ void app_main(){
     JLinker_init(&linker,&loader,&arena);
     JLinker_link(&linker);
 
-    void* arena_top = bumper_alloc(&arena,0);
 
     //JCompiler_t compiler = {0};
     //JCompiler_init(&compiler,&linker,"/sd/abcd_app");
@@ -47,6 +47,9 @@ void app_main(){
     printf("bi: %p\n",bi->constvalue);
     printf("c: %f\n",*(float*)c->constvalue);
 
-    printf("used memory: %zu\n",arena_top - bumper_arena_start(&arena));
-    printf("%d\n",0 % 8);
+    JEEXBuilder_t jex_builder = {0};
+    JEEX_create_builder(&jex_builder, &linker, &arena); //Debug only
+    assert(JEEX_build(&jex_builder) == JERR_OK);
+
+    printf("used memory: %zu\n",bumper_alloc(&arena,0) - bumper_arena_start(&arena));
 }

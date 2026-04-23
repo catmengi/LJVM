@@ -9,6 +9,7 @@
 #include "cfg.h"
 #include "bstable.h"
 
+#include <locale.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -22,6 +23,10 @@ int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
     linker->loader = loader;
 
     linker->linker_global_data.linker_flags.is_firstlaunch = 1;
+    linker->linker_global_data.ID_tracker[0] = 0;
+    linker->linker_global_data.ID_tracker[1] = 0;
+    linker->linker_global_data.ID_tracker[2] = 0;
+    //linker->linker_global_data.native_method_count = 0;
 
     INIT_LIST_HEAD(&linker->class_list);
     return hashmap_init(&linker->class_map,32,linker_ht_arena_alloc,hashmap_string_hash,hashmap_string_cmp,linker->arena);
@@ -260,8 +265,9 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     metadata->raw_self = raw_class;
 
     FAIL_SET_JUMP(bstable_init(&metadata->fields, linker->arena, raw_class->fields_count, bstable_JField_cmp, bstable_JField_find) == 0,ret_val,NULL,exit);
-     FAIL_SET_JUMP(bstable_init(&metadata->methods, linker->arena, raw_class->methods_count, bstable_JMethod_cmp, bstable_JMethod_find) == 0,ret_val,NULL,exit);
+    FAIL_SET_JUMP(bstable_init(&metadata->methods, linker->arena, raw_class->methods_count, bstable_JMethod_cmp, bstable_JMethod_find) == 0,ret_val,NULL,exit);
     class->metadata = metadata;
+    class->ID = linker->linker_global_data.ID_tracker[JFID_CLASS]++;
 
     FAIL_SET_JUMP(hashmap_set(&linker->class_map,class->name, class) == 0,ret_val,NULL,exit);
     list_add(&class->list,&linker->class_list);
@@ -382,13 +388,11 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         field->name = mangled_fname;
         field->type = *fdescription;
+        field->ID = linker->linker_global_data.ID_tracker[JFID_FIELD]++;
 
         field->flags.is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC || is_interface;
 
-        class->fields[field->flags.is_static].count++;
-
         if(field->flags.is_static){
-            metadata->sfield_count++;
             field->offset = linker->linker_global_data.sfield_curoffset;
             linker->linker_global_data.sfield_curoffset += value_sizeof(field->type);
 
@@ -404,22 +408,15 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
                 }
             }
         }else{
-            metadata->ifield_count++;
             field->offset = metadata->ifield_curoffset;
             metadata->ifield_curoffset += value_sizeof(field->type);
         }
+        metadata->fields_count[field->flags.is_static]++;
         field->flags.is_alligned = (field->offset % sizeof(uint32_t) == 0) && (field->type != EJVT_DOUBLE && field->type != EJVT_LONG);
         field->owner = class;
 
         FAIL_SET_JUMP(bstable_insert(&metadata->fields, field) == 0, err, JERR_UNKNOWN, exit);
     }
-
-    class->fields[0].fields = bumper_calloc(linker->arena,class->fields[0].count,sizeof(*class->fields[0].fields));
-    class->fields[1].fields = bumper_calloc(linker->arena,class->fields[1].count,sizeof(*class->fields[1].fields));
-    FAIL_SET_JUMP(class->fields[0].fields,err,JERR_OOM,exit);
-    FAIL_SET_JUMP(class->fields[1].fields,err,JERR_OOM,exit);
-
-    size_t field_index[2] = {0};
     /*hashmap_iterator_t field_iter = {0};
     hashmap_iterator_init(&metadata->fields,&field_iter);
     hashmap_entry_t* field_entry = NULL;
@@ -428,11 +425,6 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         class->fields[field->flags.is_static].fields[field_index[field->flags.is_static]++] = field;
     }
     */
-
-    for(unsigned i = 0; i < metadata->fields.count; i++){
-        JField_t* field = (void*)metadata->fields.elements[i];
-        class->fields[field->flags.is_static].fields[field_index[field->flags.is_static]++] = field;
-    }
 
     //Generate methods
     for(unsigned i = 0; i < description->methods_count; i++){
@@ -456,6 +448,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         method->name = mangled_name;
         method->owner = class;
+        method->ID = linker->linker_global_data.ID_tracker[JFID_METHOD]++;
         FAIL_SET_JUMP(parse_method_prototype(method,description,linker->arena) == JERR_OK,err,JERR_UNKNOWN,exit);        
 
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
@@ -468,6 +461,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
         if(method->flags.is_native){
             //Native methods doesnt need to be parsed now.
             //This is the job of compiler and further app loader
+            //method->native_index = linker->linker_global_data.native_method_count++;
         } else {
             JCodeAttribute_t* code = NULL;
             JRawAttribute_t* current_attribute = NULL; //Using raw code attribute because we can directly use it (via our constant pool)
@@ -719,10 +713,9 @@ JError_t JLinker_link(JLinker_t* linker){
         JConstant_t* super_class = JConstantPool_get(&description->constantpool, description->super_class);
         if(super_class->type == EJCT_NULL){ //This is a root object. Treat it separately
             list_add(&cur_class->as_child,&linker->root_list); //Adding to root list even if it is unitialised(otherwise we cant reach others)
-            continue;
         }
 
-        if(!cur_class->flags.is_initialised){
+        if(!cur_class->flags.is_initialised && super_class->type != EJCT_NULL){
             FAIL_SET_JUMP(super_class->type == EJCT_CLASS, err, JERR_BADPARAM,exit);
 
             JConstant_t* super_name = JConstantPool_get(&description->constantpool, *(uint16_t*)super_class->value);
@@ -739,6 +732,7 @@ JError_t JLinker_link(JLinker_t* linker){
         }
 
         JClassSymtab_t* symtab = &cur_class->symtab;
+        printf("%s : %d\n",cur_class->name, symtab->length);
         for(unsigned i = 0; i < symtab->length; i++){
             JClassSymbol_t* cur_symbol = &symtab->symbols[i];
             JConstant_t* constant = JConstantPool_get(&description->constantpool, cur_symbol->class_index);
@@ -764,6 +758,8 @@ JError_t JLinker_link(JLinker_t* linker){
 
                 array_class->flags.is_initialised = 0;
                 array_class->linker = linker;
+                array_class->ID = linker->linker_global_data.ID_tracker[JFID_CLASS]++;
+
                 list_add(&array_class->list,&linker->class_list);
                 list_add(&array_class->as_child,&array_class->parent->children);
 
@@ -781,8 +777,8 @@ JError_t JLinker_link(JLinker_t* linker){
                 refered_class = array_class;
             }
             FAIL_SET_JUMP(refered_class,err,({printf("Cannot find class: %s\n",class_name);(JERR_NOTFOUND);}),exit);
-
             cur_symbol->value = refered_class; //Add this class to constantpool
+
         }
 
         for(unsigned i = 0; i < description->interfaces_count; i++){
@@ -807,7 +803,7 @@ JError_t JLinker_link(JLinker_t* linker){
     list_for_each_entry(cur_root,&linker->root_list,as_child){
         FAIL_SET_JUMP(link_class(linker,cur_root) == JERR_OK,err,JERR_UNKNOWN,exit);
     }
-    
+
 exit:
     linker->linker_global_data.linker_flags.is_firstlaunch = 0;
     return err;

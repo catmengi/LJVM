@@ -18,27 +18,12 @@ typedef enum{
     EJCFGBT_END, //This block just ended, dont try to link something after it
 }JCFGBlockType_t;
 
-typedef struct{
-    uint16_t stack_bitmap_size; 
-    uint16_t locals_bitmap_size;
-
-    uint16_t stack_size; //SP at the time of snapshot. (used as SP in stackmap generator!)
-    uint16_t locals_size; //max_locals from bytecode
-
-    uint8_t* stack_bitmap;
-    uint8_t* locals_bitmap;
-}JCFGBlockTypeInfo_t;
-
 typedef struct JCFGBlock_t{
     uint8_t children_count; //uint8_t should more than enough
     JCFGBlock_t** children;
 
     JCFGBlockType_t type;
     uint32_t start_pc, end_pc;
-
-    JCFGBlockTypeInfo_t in_state;
-    JCFGBlockTypeInfo_t out_state;
-    JCFGBlockTypeInfo_t safepoint_state;
 
     union{
         uint8_t flags;
