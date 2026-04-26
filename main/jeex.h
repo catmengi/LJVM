@@ -126,6 +126,9 @@ enum{
     EJEEXID_CLASS = 0,
     EJEEXID_METHOD = 1,
     EJEEXID_FIELD = 2,
+    EJEEXID_32CONST = 3,
+    EJEEXID_64CONST = 4,
+    EJEEXID_STRING = 5,
 };
 
 typedef struct{

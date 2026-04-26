@@ -202,6 +202,7 @@ static JError_t init_symtabs(JClass_t* class, JEEXBuilder_t* builder){
             case EJRCT_DOUBLE:{
                 unsigned sz = (sym->symbol_type == EJRCT_LONG || sym->symbol_type == EJRCT_DOUBLE) ? sizeof(uint64_t) : sizeof(uint32_t);
                 
+                jeex_class->symtab[i].type = sz == sizeof(uint32_t) ? EJEEXID_32CONST : EJEEXID_64CONST;
                 jeex_class->symtab[i].value = bumper_calloc(builder->arena,1,sz);
                 FAIL_SET_JUMP(jeex_class->symtab[i].value,err,JERR_OOM,exit);
 
@@ -219,6 +220,8 @@ static JError_t init_symtabs(JClass_t* class, JEEXBuilder_t* builder){
                 FAIL_SET_JUMP(utf8_new->string,err,JERR_OOM,exit);
 
                 memcpy(utf8_new->string,utf8_org->string,utf8_org->length);
+                
+                jeex_class->symtab[i].type = EJEEXID_STRING;
                 jeex_class->symtab[i].value = utf8_new;
             }
             break;
