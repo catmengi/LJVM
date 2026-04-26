@@ -148,22 +148,22 @@ typedef enum {
     EJEEXOP_NEJEEXOP,
 
     // ===== Constants =====
-    EJEEXOP_PUSHCONST,
-    EJEEXOP_LDC,
+    EJEEXOP_PUSHCONST, //4 byte operand
+    EJEEXOP_LDC, //2 byte operand
 
     // ===== Local variable loads =====
-    EJEEXOP_LLOAD32,
-    EJEEXOP_LLOAD64,
+    EJEEXOP_LLOAD32, //2 byte operand
+    EJEEXOP_LLOAD64, //2 byte operand
 
     // ===== Array loads =====
-    EJEEXOP_ALOAD8,
+    EJEEXOP_ALOAD8, 
     EJEEXOP_ALOAD16,
     EJEEXOP_ALOAD32,
     EJEEXOP_ALOAD64,
 
     // ===== Local variable stores =====
-    EJEEXOP_LSTORE32,
-    EJEEXOP_LSTORE64,
+    EJEEXOP_LSTORE32, //2 byte operand
+    EJEEXOP_LSTORE64, //2 byte operand
 
     // ===== Array stores =====
     EJEEXOP_ASTORE8,
@@ -235,7 +235,7 @@ typedef enum {
     EJEEXOP_IXOR64,
 
     // ===== Local variable increment =====
-    EJEEXOP_LINC,
+    EJEEXOP_LINC, //2 byte operand + 1 byte operand
 
     // ===== Type conversions =====
     EJEEXOP_I32toI64,
@@ -284,38 +284,37 @@ typedef enum {
     EJEEXOP_IFltez,
 
     // ===== Control flow =====
-    EJEEXOP_GOTO,
-    EJEEXOP_JSR,
+    EJEEXOP_GOTO, //4 byte operand
+    EJEEXOP_JSR, //4 byte operand
     EJEEXOP_RET,
-    EJEEXOP_TABLESWITCH,
-    EJEEXOP_LOOKUPSWITCH,
+    EJEEXOP_TABLESWITCH, //TODO:
+    EJEEXOP_LOOKUPSWITCH, //TODO:
     EJEEXOP_RETURN32,
     EJEEXOP_RETURN64,
     EJEEXOP_RETURN,
     EJEEXOP_ATHROW,
-    EJEEXOP_WIDE,
 
     // ===== Field access =====
-    EJEEXOP_GETSTATIC,
-    EJEEXOP_PUTSTATIC,
-    EJEEXOP_GETFIELD,
-    EJEEXOP_PUTFIELD,
+    EJEEXOP_GETSTATIC, //2 byte operand
+    EJEEXOP_PUTSTATIC, //2 byte operand
+    EJEEXOP_GETFIELD, //2 byte operand
+    EJEEXOP_PUTFIELD, //2 byte operand
 
     // ===== Method invocation =====
-    EJEEXOP_INVOKEVIRTUAL,
-    EJEEXOP_INVOKESPECIAL,
-    EJEEXOP_INVOKESTATIC,
-    EJEEXOP_INVOKEINTERFACE,
-    EJEEXOP_INVOKENATIVE,
+    EJEEXOP_INVOKEVIRTUAL, //2 byte operand
+    EJEEXOP_INVOKESPECIAL, //2 byte operand
+    EJEEXOP_INVOKESTATIC, //2 byte operand
+    EJEEXOP_INVOKEINTERFACE, //2 byte operand
+    EJEEXOP_INVOKENATIVE, //2 byte operand
 
     // ===== Object & array creation / operations =====
-    EJEEXOP_NEW,
-    EJEEXOP_NEWARRAY,
-    EJEEXOP_ANEWARRAY,
+    EJEEXOP_NEW, //2 byte operand
+    EJEEXOP_NEWARRAY, //1 byte operand
+    EJEEXOP_ANEWARRAY, //2 byte operand
     EJEEXOP_ARRAYLENGTH,
-    EJEEXOP_CHECKCAST,
-    EJEEXOP_INSTANCEOF,
-    EJEEXOP_MULTIANEWARRAY,
+    EJEEXOP_CHECKCAST, //2 byte operand
+    EJEEXOP_INSTANCEOF, //2 byte operand
+    EJEEXOP_MULTIANEWARRAY, //2 byte operand + 1 byte operand
 
     // ===== Monitors =====
     EJEEXOP_MONITORENTER,

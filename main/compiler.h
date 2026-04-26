@@ -1,14 +1,23 @@
 #pragma once
 
+#include "cfg.h"
+#include "jeex.h"
 #include "jeex_builder.h"
 
 typedef struct{
     uint16_t size;
-    uint16_t offset; //Offset from method start. (parent block sizes sum)
-
+    uint16_t start_pc; //PC when this CFG block starts
     uint16_t last_opcode; //Index of last generated opcode start. Need for jump patching. (same as in CFG module)
-    uint8_t* code;
 }JEEXCompilerCodeBlock_t;
+
+typedef struct{
+    JMethod_t* origin_method;
+    JClass_t* origin_class;
+    JEEXBuilder_t* builder;
+    uint8_t* code;
+    uint32_t code_length;
+    uint32_t cur_offset;
+}JEEXCompilerMethodInfo_t;
 
 /*
     Compiler will work by:
