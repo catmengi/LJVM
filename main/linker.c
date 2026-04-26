@@ -23,9 +23,7 @@ int JLinker_init(JLinker_t* linker, JLoader_t* loader, bump_allocator_t* arena){
     linker->loader = loader;
 
     linker->linker_global_data.linker_flags.is_firstlaunch = 1;
-    linker->linker_global_data.ID_tracker[0] = 0;
-    linker->linker_global_data.ID_tracker[1] = 0;
-    linker->linker_global_data.ID_tracker[2] = 0;
+    linker->linker_global_data.max_ID = 0;
     //linker->linker_global_data.native_method_count = 0;
 
     INIT_LIST_HEAD(&linker->class_list);
@@ -267,7 +265,7 @@ static JClass_t* create_class(JLinker_t* linker, JRawClass_t* raw_class){
     FAIL_SET_JUMP(bstable_init(&metadata->fields, linker->arena, raw_class->fields_count, bstable_JField_cmp, bstable_JField_find) == 0,ret_val,NULL,exit);
     FAIL_SET_JUMP(bstable_init(&metadata->methods, linker->arena, raw_class->methods_count, bstable_JMethod_cmp, bstable_JMethod_find) == 0,ret_val,NULL,exit);
     class->metadata = metadata;
-    class->ID = linker->linker_global_data.ID_tracker[JFID_CLASS]++;
+    class->ID = linker->linker_global_data.max_ID++;
 
     FAIL_SET_JUMP(hashmap_set(&linker->class_map,class->name, class) == 0,ret_val,NULL,exit);
     list_add(&class->list,&linker->class_list);
@@ -388,7 +386,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         field->name = mangled_fname;
         field->type = *fdescription;
-        field->ID = linker->linker_global_data.ID_tracker[JFID_FIELD]++;
+        field->ID = linker->linker_global_data.max_ID++;
 
         field->flags.is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC || is_interface;
 
@@ -448,7 +446,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         method->name = mangled_name;
         method->owner = class;
-        method->ID = linker->linker_global_data.ID_tracker[JFID_METHOD]++;
+        method->ID = linker->linker_global_data.max_ID++;
         FAIL_SET_JUMP(parse_method_prototype(method,description,linker->arena) == JERR_OK,err,JERR_UNKNOWN,exit);        
 
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
@@ -471,7 +469,11 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
                     break;
                 }
             }
+
             method->code = code;
+            FAIL_SET_JUMP((err = JCFG_init(&method->cfg, method->code, method, linker->arena)) == JERR_OK,err,err,exit);
+            FAIL_SET_JUMP((err = JCFG_build(&method->cfg)) == JERR_OK,err,err,exit);
+
         }
 
         metadata->methods_count[method->flags.is_static]++;
@@ -758,7 +760,7 @@ JError_t JLinker_link(JLinker_t* linker){
 
                 array_class->flags.is_initialised = 0;
                 array_class->linker = linker;
-                array_class->ID = linker->linker_global_data.ID_tracker[JFID_CLASS]++;
+                array_class->ID = linker->linker_global_data.max_ID++;
 
                 list_add(&array_class->list,&linker->class_list);
                 list_add(&array_class->as_child,&array_class->parent->children);

@@ -433,15 +433,6 @@ exit:
     return err;
 }
 
-typedef struct{
-    uintptr_t* values;
-    unsigned sp;
-}JCFGTemporaryStack_t;
-
-#define INIT_STACK(stack,size) ({(stack)->values = alloca(sizeof(uintptr_t) * size); (stack)->sp = 0;})
-#define STACK_POP(stack) ({uintptr_t retval = (stack)->sp > 0 ? (uintptr_t)((stack)->values[--(stack)->sp]) : (uintptr_t)NULL; (retval);})
-#define STACK_PUSH(stack, value) ({(stack)->values[(stack)->sp++] = (uintptr_t)value;})
-
 static JCFGBlock_t* find_cfg_block(JCFG_t* cfg, uint32_t start_pc){
     JCFGBlock_t template = {
         .start_pc = start_pc,
@@ -498,6 +489,7 @@ static JError_t build_graph(JCFG_t* cfg){
         for(uint32_t pc = cur_block->start_pc; pc < cur_block->end_pc; pc += opcode_sizes[code[pc]]){
             JOpcode_t opcode = code[pc];
             uint32_t next_pc = pc + opcode_sizes[opcode];
+            cur_block->last_opcode_pc = pc; //Just required to patch IF/GOTOs and other shit
 
             switch(opcode){
                 default: break;

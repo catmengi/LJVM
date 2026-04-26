@@ -24,6 +24,7 @@ typedef struct JCFGBlock_t{
 
     JCFGBlockType_t type;
     uint32_t start_pc, end_pc;
+    uint32_t last_opcode_pc;
 
     union{
         uint8_t flags;
@@ -61,6 +62,15 @@ typedef struct{
     JCodeAttribute_t* bytecode;
 }JCFG_t;
 extern uint8_t opcode_sizes[256];
+
+typedef struct{
+    uintptr_t* values;
+    unsigned sp;
+}JCFGTemporaryStack_t;
+
+#define INIT_STACK(stack,size) ({(stack)->values = alloca(sizeof(uintptr_t) * size); (stack)->sp = 0;})
+#define STACK_POP(stack) ({uintptr_t retval = (stack)->sp > 0 ? (uintptr_t)((stack)->values[--(stack)->sp]) : (uintptr_t)NULL; (retval);})
+#define STACK_PUSH(stack, value) ({(stack)->values[(stack)->sp++] = (uintptr_t)value;})
 
 JError_t JCFG_init(JCFG_t* cfg, JCodeAttribute_t* bytecode,JMethod_t* method, bump_allocator_t* arena);
 JError_t JCFG_build(JCFG_t* cfg);

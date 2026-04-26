@@ -26,7 +26,7 @@ typedef struct JLinker_t{
                 bool is_firstlaunch:1;
             };
         }linker_flags;
-        uint32_t ID_tracker[3]; //0 - classes, 1 - methods, 2 - fields; Store max id of each type
+        uint32_t max_ID; //Used to give unique IDs to classes, methods and fields
         size_t sfield_curoffset; //use this field as the size
                                  //for allocating static field memory
     }linker_global_data;

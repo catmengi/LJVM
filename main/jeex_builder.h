@@ -6,8 +6,8 @@
 #include "bumper.h"
 
 typedef struct{
-    bump_allocator_t* output_arena; //Arena where JEX data will be stored
-    JEEXHeader_t* jeex_header; //Required to track all JEEX classes, methods, fields.
+    bump_allocator_t* arena; //Arena where JEX data will be stored
+    JEEXHeader_t* jeex; //Required to track all JEEX classes, methods, fields.
     JLinker_t* linker;
 }JEEXBuilder_t;
 
