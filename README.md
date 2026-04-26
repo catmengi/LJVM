@@ -5,6 +5,7 @@ DONE:
 2. Linker (might containt some bugs)
 
 TO BE DONE: 
+
 0. Create JEX bytecode
 1. Convert Java into a simpler stack based bytecode(JEX bytecode)
 2. Convert linked classes into simpler and lighter format (JEX, JEspresso Executable)
