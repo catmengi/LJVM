@@ -3,10 +3,9 @@
 #include <stdint.h>
 
 
-
 typedef struct JEEXClass_t JEEXClass_t;
 
-//CEJEEXOPyed thoose to make jeex.h separate from other JEspresso headers!
+//copied thoose to make jeex.h separate from other JEspresso headers!
 enum{
     EJEEXVT_BYTE = 'B',
     EJEEXVT_CHAR = 'C',

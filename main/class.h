@@ -50,7 +50,6 @@ typedef struct JMethod_t{
 
     char* name; //This name is not java's raw name, it is name@description
     uint16_t vtable_index; //valid when is_static == 0
-    uint16_t native_index; //valid when is_native != 0
 
     JClass_t* owner;
     JMethodPrototype_t prototype;
