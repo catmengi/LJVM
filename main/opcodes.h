@@ -1,4 +1,6 @@
 #pragma once
+#include <stdint.h>
+
 /**
  * Java bytecode opcodes as a C enum.
  * Each constant is named EJOPCODE_<uppercase mnemonic> and has the opcode value.
@@ -267,3 +269,74 @@ typedef enum {
     EJOPCODE_IMPDEP1        = 0xfe,
     EJOPCODE_IMPDEP2        = 0xff
 }JOpcode_t;
+
+const uint8_t JOpcode_args_sizes[256] = {
+    [EJOPCODE_BIPUSH]         = 1,
+    [EJOPCODE_SIPUSH]         = 2,
+    [EJOPCODE_LDC]            = 1,
+    [EJOPCODE_LDC_W]          = 2,
+    [EJOPCODE_LDC2_W]         = 2,
+
+    [EJOPCODE_ILOAD]          = 1,
+    [EJOPCODE_LLOAD]          = 1,
+    [EJOPCODE_FLOAD]          = 1,
+    [EJOPCODE_DLOAD]          = 1,
+    [EJOPCODE_ALOAD]          = 1,
+
+    [EJOPCODE_ISTORE]         = 1,
+    [EJOPCODE_LSTORE]         = 1,
+    [EJOPCODE_FSTORE]         = 1,
+    [EJOPCODE_DSTORE]         = 1,
+    [EJOPCODE_ASTORE]         = 1,
+
+    [EJOPCODE_IINC]           = 2,
+
+    [EJOPCODE_IFEQ]           = 2,
+    [EJOPCODE_IFNE]           = 2,
+    [EJOPCODE_IFLT]           = 2,
+    [EJOPCODE_IFGE]           = 2,
+    [EJOPCODE_IFGT]           = 2,
+    [EJOPCODE_IFLE]           = 2,
+    [EJOPCODE_IF_ICMPEQ]      = 2,
+    [EJOPCODE_IF_ICMPNE]      = 2,
+    [EJOPCODE_IF_ICMPLT]      = 2,
+    [EJOPCODE_IF_ICMPGE]      = 2,
+    [EJOPCODE_IF_ICMPGT]      = 2,
+    [EJOPCODE_IF_ICMPLE]      = 2,
+    [EJOPCODE_IF_ACMPEQ]      = 2,
+    [EJOPCODE_IF_ACMPNE]      = 2,
+
+    [EJOPCODE_GOTO]           = 2,
+    [EJOPCODE_JSR]            = 2,
+    [EJOPCODE_RET]            = 1,
+
+    [EJOPCODE_GETSTATIC]      = 2,
+    [EJOPCODE_PUTSTATIC]      = 2,
+    [EJOPCODE_GETFIELD]       = 2,
+    [EJOPCODE_PUTFIELD]       = 2,
+
+    [EJOPCODE_INVOKEVIRTUAL]  = 2,
+    [EJOPCODE_INVOKESPECIAL]  = 2,
+    [EJOPCODE_INVOKESTATIC]   = 2,
+    [EJOPCODE_INVOKEINTERFACE]= 4,
+    [EJOPCODE_INVOKEDYNAMIC]  = 4,
+
+    [EJOPCODE_NEW]            = 2,
+    [EJOPCODE_NEWARRAY]       = 1,
+    [EJOPCODE_ANEWARRAY]      = 2,
+
+    [EJOPCODE_CHECKCAST]      = 2,
+    [EJOPCODE_INSTANCEOF]     = 2,
+
+    [EJOPCODE_MULTIANEWARRAY] = 3,
+
+    [EJOPCODE_IFNULL]         = 2,
+    [EJOPCODE_IFNONNULL]      = 2,
+
+    [EJOPCODE_GOTO_W]         = 4,
+    [EJOPCODE_JSR_W]          = 4,
+
+    // All other opcodes (including NOP, constants, loads/stores without index,
+    // arithmetic, returns, etc.) have 0 argument bytes.
+    // Unused opcodes (0xCB–0xFD) are also 0.
+};

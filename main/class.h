@@ -1,5 +1,4 @@
 #pragma once
-#include "cfg.h"
 #include "loader.h"
 
 typedef enum{
@@ -44,7 +43,6 @@ typedef struct{
     uint8_t arguments_count;
 }JMethodPrototype_t;
 
-#include "cfg.h"
 typedef struct JMethod_t{
     uint32_t ID;
 
@@ -65,9 +63,10 @@ typedef struct JMethod_t{
         };
     }flags;
 
-    //Thoose fields are only valid when method is not native!
-    JCodeAttribute_t* code;
-    JCFG_t cfg; 
+    union{
+        JCodeAttribute_t* bytecode; //valid if not native
+        uint32_t native_id; //valid if native....
+    }code;
 }JMethod_t;
 
 typedef struct{

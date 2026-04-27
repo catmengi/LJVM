@@ -11,5 +11,5 @@ typedef struct{
     JLinker_t* linker;
 }JEEXBuilder_t;
 
-JError_t JEEX_create_builder(JEEXBuilder_t* builder, JLinker_t* linker ,bump_allocator_t* arena);
-JError_t JEEX_build(JEEXBuilder_t* builder);
+JError_t JEEXBuilder_init(JEEXBuilder_t* builder, JLinker_t* linker ,bump_allocator_t* arena);
+JError_t JEEXBuilder_build(JEEXBuilder_t* builder);

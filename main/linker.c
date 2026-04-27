@@ -1,15 +1,12 @@
 #include "linker.h"
-#include "compiler.h"
 #include "hashmap.h"
 #include "list.h"
 #include "loader.h"
 #include "jerror.h"
 #include "bumper.h"
 #include "class.h"
-#include "cfg.h"
 #include "bstable.h"
 
-#include <locale.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -457,9 +454,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
 
         if(method->flags.is_native){
-            //Native methods doesnt need to be parsed now.
-            //This is the job of compiler and further app loader
-            //method->native_index = linker->linker_global_data.native_method_count++;
+            assert(0 && "TODO: lookup native methods!");
         } else {
             JCodeAttribute_t* code = NULL;
             JRawAttribute_t* current_attribute = NULL; //Using raw code attribute because we can directly use it (via our constant pool)
@@ -470,10 +465,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
                 }
             }
 
-            method->code = code;
-            FAIL_SET_JUMP((err = JCFG_init(&method->cfg, method->code, method, linker->arena)) == JERR_OK,err,err,exit);
-            FAIL_SET_JUMP((err = JCFG_build(&method->cfg)) == JERR_OK,err,err,exit);
-
+            method->code.bytecode = code;
         }
 
         metadata->methods_count[method->flags.is_static]++;

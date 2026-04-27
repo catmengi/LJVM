@@ -1,6 +1,5 @@
 #include "jeex_builder.h"
 #include "bumper.h"
-#include "cfg.h"
 #include "class.h"
 #include "jeex.h"
 #include "jerror.h"
@@ -11,7 +10,7 @@
 #include <string.h>
 #include <assert.h>
 
-JError_t JEEX_create_builder(JEEXBuilder_t* builder, JLinker_t* linker ,bump_allocator_t* arena){
+JError_t JEEXBuilder_init(JEEXBuilder_t* builder, JLinker_t* linker ,bump_allocator_t* arena){
     JError_t err = JERR_OK;
 
     builder->linker = linker;
@@ -129,8 +128,15 @@ static JError_t finalize_classes(JClass_t* class, JEEXBuilder_t* builder){
         jeex_method->ID = method->ID;
         
         if(jeex_method->flags.is_native){
-            assert(0 && "TODO: find method in native table!");
-            //FIND NATIVE ID OF METHOD!
+            jeex_method->code.native_id = method->code.native_id;
+        } else {
+            jeex_method->code.bytecode = bumper_calloc(builder->arena, 1, sizeof(*jeex_method->code.bytecode));
+            FAIL_SET_JUMP(jeex_method->code.bytecode,err,JERR_OOM,exit);
+
+            jeex_method->code.bytecode->code_length = method->code.bytecode->code_length;
+            jeex_method->code.bytecode->locals_count = method->code.bytecode->max_locals;
+            jeex_method->code.bytecode->stack_size = method->code.bytecode->max_stack;
+            jeex_method->code.bytecode->code_length = method->code.bytecode->code_length; //Code length will be the same between original class and JEEX
         }
 
         jeex_method->prototype.return_type = method->prototype.return_type;
@@ -237,7 +243,7 @@ exit:
     return err;
 }
 
-JError_t JEEX_build(JEEXBuilder_t* builder){
+JError_t JEEXBuilder_build(JEEXBuilder_t* builder){
     JError_t err = JERR_OK;
 
     JClass_t* root = NULL;

@@ -1,5 +1,4 @@
 #pragma once
-#include "cfg.h"
 #include "class.h"
 #include "loader.h"
 #include "bumper.h"

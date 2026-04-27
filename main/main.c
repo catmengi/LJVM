@@ -1,7 +1,6 @@
 #include "bumper.h"
 #include "cfg.h"
 #include "class.h"
-#include "compiler.h"
 #include "jeex_builder.h"
 #include "linker.h"
 #include "preloader.h"
@@ -48,9 +47,8 @@ void app_main(){
     printf("c: %f\n",*(float*)c->constvalue);
 
     JEEXBuilder_t jeex_builder = {0};
-    JEEX_create_builder(&jeex_builder, &linker, &arena); //Debug only
-    assert(JEEX_build(&jeex_builder) == JERR_OK);
-    JEEXCompiler_start(&jeex_builder);
+    JEEXBuilder_init(&jeex_builder, &linker, &arena); //Debug only
+    assert(JEEXBuilder_build(&jeex_builder) == JERR_OK);
 
     printf("used memory: %zu\n",bumper_alloc(&arena,0) - bumper_arena_start(&arena));
 }
