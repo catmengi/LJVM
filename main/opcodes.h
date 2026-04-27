@@ -270,7 +270,7 @@ typedef enum {
     EJOPCODE_IMPDEP2        = 0xff
 }JOpcode_t;
 
-const uint8_t JOpcode_args_sizes[256] = {
+static const uint8_t JOpcode_args_sizes[256] = {
     [EJOPCODE_BIPUSH]         = 1,
     [EJOPCODE_SIPUSH]         = 2,
     [EJOPCODE_LDC]            = 1,

@@ -46,7 +46,7 @@ void app_main(){
     printf("c: %f\n",*(float*)c->constvalue);
 
     JEEXBuilder_t jeex_builder = {0};
-    JEEXBuilder_init(&jeex_builder, &linker, &arena); //Debug only
+    JEEXBuilder_init(&jeex_builder, &linker, &arena);
     assert(JEEXBuilder_build(&jeex_builder) == JERR_OK);
 
     printf("used memory: %zu\n",bumper_alloc(&arena,0) - bumper_arena_start(&arena));

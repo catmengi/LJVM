@@ -6,6 +6,7 @@
 #include "bumper.h"
 #include "class.h"
 #include "bstable.h"
+#include "opcodes.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -346,6 +347,73 @@ static JError_t parse_method_prototype(JMethod_t* method, const char* descriptor
     return JERR_OK;
 }
 
+#include "lb_endian.h"
+static JError_t patch_bytecode(JMethod_t* method){
+    JError_t err = JERR_OK;
+
+    JClass_t* class = method->owner;
+    JClassSymtab_t* symtab = &class->symtab;
+    JCodeAttribute_t* bytecode = method->code.bytecode;
+    uint8_t* code = bytecode->code;
+
+    for(uint32_t pc = 0; pc < bytecode->code_length; pc +=  1 + JOpcode_args_sizes[code[pc]]){
+        uint8_t* opcode = &code[pc];
+        switch(*opcode){
+            default: break;
+
+            case EJOPCODE_LOOKUPSWITCH:
+            case EJOPCODE_TABLESWITCH:
+                assert(0 && "TODO: switches");
+
+            case EJOPCODE_INVOKEINTERFACE:
+            case EJOPCODE_INSTANCEOF:
+            case EJOPCODE_CHECKCAST:
+            case EJOPCODE_MULTIANEWARRAY:
+            case EJOPCODE_NEW:
+            case EJOPCODE_LDC_W:
+            case EJOPCODE_LDC2_W:
+            case EJOPCODE_INVOKESPECIAL:
+            case EJOPCODE_INVOKESTATIC:
+            case EJOPCODE_GETSTATIC:
+            case EJOPCODE_GETFIELD:
+            case EJOPCODE_PUTSTATIC:
+            case EJOPCODE_PUTFIELD:{
+                uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
+
+                assert(symbol);
+
+                *(uint16_t*)(opcode + 1) = cpu_to_be16(JClassSymtab_indexof(symtab, symbol));
+            }
+            break;
+
+            case EJOPCODE_LDC:{
+                uint8_t index = *(opcode + 1);
+                JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
+
+                assert(symbol);
+
+                *(uint8_t*)(opcode + 1) = JClassSymtab_indexof(symtab, symbol);
+            }
+            break;
+
+            case EJOPCODE_INVOKEVIRTUAL:{
+                uint16_t index = be16_to_cpu(*(uint16_t*)(opcode + 1));
+                JClassSymbol_t* symbol = JClassSymtab_get_symbol(symtab, index);
+                JMethod_t* vmethod = symbol->value;
+
+                assert(symbol);
+                assert(symbol->symbol_type == EJRCT_METHOD);
+                assert(!vmethod->flags.is_static);
+
+                *(uint16_t*)(opcode + 1) = cpu_to_be64(vmethod->vtable_index);
+            }
+            break;
+        }
+    }
+
+    return err;
+}
 
 //Recursive shit
 static JError_t build_class(JLinker_t* linker, JClass_t* class){
@@ -466,6 +534,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             }
 
             method->code.bytecode = code;
+            FAIL_SET_JUMP(patch_bytecode(method) == JERR_OK,err,JERR_OOM,exit);
         }
 
         metadata->methods_count[method->flags.is_static]++;

@@ -1,7 +1,8 @@
 #pragma once
 
 #include <stdint.h>
-
+#include <stddef.h>
+#include "opcodes.h"
 
 typedef struct JEEXClass_t JEEXClass_t;
 
@@ -42,7 +43,6 @@ typedef struct JEEXMethodBytecode_t{
 }JEEXMethodBytecode_t;
 
 typedef struct JEEXMethod_t{
-    uint32_t ID;
     char* mangled_name;
 
     union{
@@ -66,10 +66,10 @@ typedef struct JEEXMethod_t{
 }JEEXMethod_t;
 
 typedef struct{
-    uint32_t ID;    
-
     uint8_t type;
+
     uint32_t offset;
+    void* initialiser; //If non NULL, on first access this field is initialised by it then it MUST BE NULLed
 }JEEXField_t;
 
 typedef struct{
@@ -93,10 +93,9 @@ typedef struct{
 }JEEXRawUTF8_t;
 
 typedef struct JEEXClass_t{
-    uint32_t ID; //Might be useful to trace linker class from JEEX
-    
     char* name; //Still required to find main class or for Class.forName()
     JEEXClass_t* parent;
+    JEEXMethod_t* main_method; //Non NULL if method have static "main@([Ljava/lang/String;)V"
 
     JEEXClass_t** children;
     JEEXClass_t** implements;
@@ -129,3 +128,5 @@ typedef struct{
     size_t id_table_length;
     size_t static_fields_size; //Size in bytes required to store static fields!
 }JEEXHeader_t;
+
+JEEXClass_t* JEEXClass_get(JEEXHeader_t* jeex, char* name);

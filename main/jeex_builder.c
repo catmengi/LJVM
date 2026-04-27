@@ -71,7 +71,7 @@ static JError_t create_classes(JClass_t* class, JEEXBuilder_t* builder){
     jeex_class->symtab = bumper_calloc(builder->arena,jeex_class->symtab_length,sizeof(*jeex_class->symtab));
     FAIL_SET_JUMP(jeex_class->symtab,err,JERR_OOM,exit);
 
-    jeex_class->ID = class->ID;
+    //jeex_class->ID = class->ID;
 
     jeex_class->vtable.count = class->vtable.count;
     jeex_class->vtable.methods = bumper_calloc(builder->arena,jeex_class->vtable.count,sizeof(*jeex_class->vtable.methods));
@@ -83,7 +83,7 @@ static JError_t create_classes(JClass_t* class, JEEXBuilder_t* builder){
     FAIL_SET_JUMP((jeex_class->fields[0].fields = bumper_calloc(builder->arena,jeex_class->fields[0].count,sizeof(*jeex_class->fields[0].fields))),err,JERR_OOM,exit);
     FAIL_SET_JUMP((jeex_class->fields[1].fields = bumper_calloc(builder->arena,jeex_class->fields[1].count,sizeof(*jeex_class->fields[1].fields))),err,JERR_OOM,exit);
 
-    jeex_class->name = bumper_strdup(builder->arena,class->name);
+    jeex_class->name = class->name;
     FAIL_SET_JUMP(jeex_class->name,err,JERR_OOM,exit);
 
 exit:
@@ -104,9 +104,10 @@ static JError_t finalize_classes(JClass_t* class, JEEXBuilder_t* builder){
         JEEXField_t* jeex_field = bumper_calloc(builder->arena,1,sizeof(*jeex_field));
         FAIL_SET_JUMP(jeex_field,err,JERR_OOM,exit);
 
-        jeex_field->ID = field->ID;
+        //jeex_field->ID = field->ID;
         jeex_field->offset = field->offset;
         jeex_field->type = field->type;
+        jeex_field->initialiser = field->constvalue;
 
         jeex_class->fields[field->flags.is_static].fields[fi[field->flags.is_static]++] = jeex_field;
 
@@ -122,10 +123,10 @@ static JError_t finalize_classes(JClass_t* class, JEEXBuilder_t* builder){
         jeex_method->flags.is_native = method->flags.is_native;
         jeex_method->flags.is_static = method->flags.is_static;
 
-        jeex_method->mangled_name = bumper_strdup(builder->arena,method->name);
+        jeex_method->mangled_name = method->name;
         FAIL_SET_JUMP(jeex_method->mangled_name,err,JERR_OOM,exit);
 
-        jeex_method->ID = method->ID;
+        //jeex_method->ID = method->ID;
         
         if(jeex_method->flags.is_native){
             jeex_method->code.native_id = method->code.native_id;
@@ -133,10 +134,15 @@ static JError_t finalize_classes(JClass_t* class, JEEXBuilder_t* builder){
             jeex_method->code.bytecode = bumper_calloc(builder->arena, 1, sizeof(*jeex_method->code.bytecode));
             FAIL_SET_JUMP(jeex_method->code.bytecode,err,JERR_OOM,exit);
 
+            jeex_method->code.bytecode->exception_count = method->code.bytecode->exception_table_length;
+            jeex_method->code.bytecode->exceptions = bumper_calloc(builder->arena,jeex_method->code.bytecode->exception_count,sizeof(*jeex_method->code.bytecode->exceptions));
+            FAIL_SET_JUMP(jeex_method->code.bytecode->exceptions,err,JERR_OOM,exit);
+
             jeex_method->code.bytecode->code_length = method->code.bytecode->code_length;
             jeex_method->code.bytecode->locals_count = method->code.bytecode->max_locals;
             jeex_method->code.bytecode->stack_size = method->code.bytecode->max_stack;
             jeex_method->code.bytecode->code_length = method->code.bytecode->code_length; //Code length will be the same between original class and JEEX
+            jeex_method->code.bytecode->code = method->code.bytecode->code;
         }
 
         jeex_method->prototype.return_type = method->prototype.return_type;
@@ -151,6 +157,11 @@ static JError_t finalize_classes(JClass_t* class, JEEXBuilder_t* builder){
         
         builder->jeex->id_table[method->ID].type = EJEEXID_METHOD;
         builder->jeex->id_table[method->ID].element = jeex_method;
+    }
+    JMethod_t* main_method = JClass_get_method(class, "main@([Ljava/lang/String;)V");
+    if(main_method && main_method->flags.is_static){
+        assert(builder->jeex->id_table[main_method->ID].type == EJEEXID_METHOD);
+        jeex_class->main_method = builder->jeex->id_table[main_method->ID].element;
     }
 
     for(unsigned i = 0; i < class->vtable.count; i++){
@@ -243,6 +254,49 @@ exit:
     return err;
 }
 
+static JError_t fix_exceptions(JClass_t* class, JEEXBuilder_t* builder){
+    JError_t err = JERR_OK;
+    JLinkerMetadata_t* class_meta = class->metadata;
+
+    for(unsigned i = 0; i < class_meta->methods.count; i++){
+        JMethod_t* method = (void*)class_meta->methods.elements[i];
+        if(!method->flags.is_native){
+            JEEXMethod_t* jeex_method = builder->jeex->id_table[method->ID].element;
+            JCodeAttribute_t* java_code = method->code.bytecode;
+            JEEXMethodBytecode_t* jeex_code = jeex_method->code.bytecode;
+            
+            for(unsigned i = 0; i < java_code->exception_table_length; i++){
+                typeof(java_code->exception_table) exception = &java_code->exception_table[i];
+                JEEXBytecodeException_t* jeex_exception = jeex_code->exceptions;
+
+
+                if(exception->catch_type != 0){
+                    JClassSymbol_t* catch_sym = JClassSymtab_get_symbol(&class->symtab, exception->catch_type);
+
+                    assert(catch_sym);
+                    assert(catch_sym->symbol_type == EJRCT_CLASS);
+
+                    JClass_t* catch = catch_sym->value;
+
+                    jeex_exception->type = builder->jeex->id_table[catch->ID].element;
+                }
+
+                jeex_exception->start_pc = exception->start_pc;
+                jeex_exception->end_pc = exception->end_pc;
+                jeex_exception->handler_pc = exception->handler_pc;
+            }
+        }
+    }
+
+    JClass_t* child = NULL;
+    list_for_each_entry(child, &class->children, as_child){
+        FAIL_SET_JUMP(fix_exceptions(child, builder) == JERR_OK,err,JERR_UNKNOWN,exit);
+    }
+
+exit:
+    return err;
+}
+
 JError_t JEEXBuilder_build(JEEXBuilder_t* builder){
     JError_t err = JERR_OK;
 
@@ -256,10 +310,24 @@ JError_t JEEXBuilder_build(JEEXBuilder_t* builder){
     list_for_each_entry(root, &builder->linker->root_list, as_child){
         FAIL_SET_JUMP(init_symtabs(root, builder) == JERR_OK,err,JERR_UNKNOWN,exit);
     }
+    list_for_each_entry(root, &builder->linker->root_list, as_child){
+        FAIL_SET_JUMP(fix_exceptions(root, builder) == JERR_OK,err,JERR_UNKNOWN,exit);
+    }
 
 
     builder->jeex->static_fields_size = builder->linker->linker_global_data.sfield_curoffset;
 
 exit:
     return err;
+}
+
+JEEXClass_t* JEEXClass_get(JEEXHeader_t* jeex, char* name){
+    for(unsigned i = 0; i < jeex->id_table_length; i++){
+        if(jeex->id_table[i].type == EJEEXID_CLASS){
+            JEEXClass_t* class = jeex->id_table[i].element;
+            if(strcmp(class->name, name) == 0)
+                return class;
+        }
+    }
+    return NULL;
 }
