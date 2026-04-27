@@ -1,5 +1,4 @@
 #include "bumper.h"
-#include "cfg.h"
 #include "class.h"
 #include "jeex_builder.h"
 #include "linker.h"
