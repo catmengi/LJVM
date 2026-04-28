@@ -21,6 +21,20 @@ enum{
     EJEEXVT_BOOL = 'Z',
     EJEEXVT_VOID = 'V',
 };
+
+enum{
+    EJEEXST_NULL, //nothinh
+    EJEEXST_STRING, //JEEXRawUTF8_t*
+    EJEEXST_INT, //uint32_t*
+    EJEEXST_LONG, //uint64_t*
+    EJEEXST_FLOAT, //float*
+    EJEEXST_DOUBLE, //double*
+    EJEEXST_CLASS, //JEEXClass_t*
+    EJEEXST_FIELD, //JEEXField_t*
+    EJEEXST_METHOD, //JEEXMethod_t*
+    EJEEXST_INTERFACEMETHODREF, //JEEXMethod_t*
+};
+
 //==================================================================
 
 typedef struct{
@@ -43,6 +57,7 @@ typedef struct JEEXMethodBytecode_t{
 }JEEXMethodBytecode_t;
 
 typedef struct JEEXMethod_t{
+    JEEXClass_t* owner;
     char* mangled_name;
 
     union{
@@ -95,7 +110,6 @@ typedef struct{
 typedef struct JEEXClass_t{
     char* name; //Still required to find main class or for Class.forName()
     JEEXClass_t* parent;
-    JEEXMethod_t* main_method; //Non NULL if method have static "main@([Ljava/lang/String;)V"
 
     JEEXClass_t** children;
     JEEXClass_t** implements;
@@ -104,18 +118,17 @@ typedef struct JEEXClass_t{
     JEEXSymbol_t* symtab;
     unsigned symtab_length;
     
-    uint32_t object_size; //Size of that class when created as object
+    JEEXMethodTable_t static_methods;
     JEEXMethodTable_t vtable;
     JEEXFieldTable_t fields[2]; //1 - static, 0 - instance. Stored because we need GC to scan them
+
+    uint32_t object_size; //Size of that class when created as object
 }JEEXClass_t;
 
 enum{
     EJEEXID_CLASS = 0,
     EJEEXID_METHOD = 1,
     EJEEXID_FIELD = 2,
-    EJEEXID_32CONST = 3,
-    EJEEXID_64CONST = 4,
-    EJEEXID_STRING = 5,
 };
 
 typedef struct{
@@ -130,3 +143,4 @@ typedef struct{
 }JEEXHeader_t;
 
 JEEXClass_t* JEEXClass_get(JEEXHeader_t* jeex, char* name);
+JEEXMethod_t* JEEXMethod_get(JEEXClass_t* class, char* mangled_name);

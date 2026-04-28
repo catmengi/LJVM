@@ -406,7 +406,7 @@ static JError_t patch_bytecode(JMethod_t* method){
                 assert(symbol->symbol_type == EJRCT_METHOD);
                 assert(!vmethod->flags.is_static);
 
-                *(uint16_t*)(opcode + 1) = cpu_to_be64(vmethod->vtable_index);
+                *(uint16_t*)(opcode + 1) = cpu_to_be16(vmethod->vtable_index);
             }
             break;
         }
@@ -569,6 +569,7 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
             if(override_with){
                 FAIL_SET_JUMP(!method->flags.is_final,err,JERR_BADPARAM,exit);
                 new_vtable->methods[i] = override_with;
+                override_with->vtable_index = i;
                 override_with->flags.is_set = 1;
             }
         }
@@ -593,13 +594,10 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
 
         for(unsigned i = 0; i < metadata->methods.count; i++){
             JMethod_t* method = (void*)metadata->methods.elements[i];
-            if(method->flags.is_set) continue;
-            if(method->flags.is_static) continue;
+            if(method->flags.is_set || method->flags.is_static) continue;
 
-            unsigned method_index = vtable_index++;
-
-            new_vtable->methods[method_index] = method;
-            method->vtable_index = method_index;
+            method->vtable_index = vtable_index++;
+            new_vtable->methods[method->vtable_index] = method;
         }
     }
     class->ifields_size = metadata->ifield_curoffset;

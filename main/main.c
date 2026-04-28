@@ -3,6 +3,7 @@
 #include "jeex_builder.h"
 #include "linker.h"
 #include "preloader.h"
+#include "vm.h"
 
 #include <string.h>
 
@@ -49,5 +50,9 @@ void app_main(){
     JEEXBuilder_init(&jeex_builder, &linker, &arena);
     assert(JEEXBuilder_build(&jeex_builder) == JERR_OK);
 
+    VM_t* vm = malloc(sizeof(*vm));;
+    printf("vm: %p\n",vm);
+    VM_init(vm, jeex_builder.jeex);
+    VM_start(vm, "dummy");
     printf("used memory: %zu\n",bumper_alloc(&arena,0) - bumper_arena_start(&arena));
 }
