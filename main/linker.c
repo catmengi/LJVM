@@ -356,7 +356,7 @@ static JError_t patch_bytecode(JMethod_t* method){
     JCodeAttribute_t* bytecode = method->code.bytecode;
     uint8_t* code = bytecode->code;
 
-    for(uint32_t pc = 0; pc < bytecode->code_length; pc +=  1 + JOpcode_args_sizes[code[pc]]){
+    for(uint32_t pc = 0; pc < bytecode->code_length; pc += 1 + JOpcode_args_sizes[code[pc]]){
         uint8_t* opcode = &code[pc];
         switch(*opcode){
             default: break;
@@ -383,7 +383,7 @@ static JError_t patch_bytecode(JMethod_t* method){
 
                 assert(symbol);
 
-                *(uint16_t*)(opcode + 1) = cpu_to_be16(JClassSymtab_indexof(symtab, symbol));
+                *((uint16_t*)(opcode + 1)) = cpu_to_be16(JClassSymtab_indexof(symtab, symbol));
             }
             break;
 
@@ -393,7 +393,7 @@ static JError_t patch_bytecode(JMethod_t* method){
 
                 assert(symbol);
 
-                *(uint8_t*)(opcode + 1) = JClassSymtab_indexof(symtab, symbol);
+                *((uint8_t*)(opcode + 1)) = JClassSymtab_indexof(symtab, symbol);
             }
             break;
 
@@ -406,7 +406,7 @@ static JError_t patch_bytecode(JMethod_t* method){
                 assert(symbol->symbol_type == EJRCT_METHOD);
                 assert(!vmethod->flags.is_static);
 
-                *(uint16_t*)(opcode + 1) = cpu_to_be16(vmethod->vtable_index);
+                *((uint16_t*)(opcode + 1)) = cpu_to_be16(vmethod->vtable_index);
             }
             break;
         }
@@ -533,8 +533,10 @@ static JError_t build_class(JLinker_t* linker, JClass_t* class){
                 }
             }
 
-            method->code.bytecode = code;
-            FAIL_SET_JUMP(patch_bytecode(method) == JERR_OK,err,JERR_OOM,exit);
+            if(code){
+                method->code.bytecode = code;
+                FAIL_SET_JUMP(patch_bytecode(method) == JERR_OK,err,JERR_OOM,exit);
+            }
         }
 
         metadata->methods_count[method->flags.is_static]++;
