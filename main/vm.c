@@ -1,4 +1,4 @@
-#include "esp_heap_caps.h"
+#include <stddef.h>
 #include "freertos/idf_additions.h"
 #include "jeex.h"
 #include "vm.h"
@@ -9,6 +9,9 @@
 #include "portmacro.h"
 
 #include <string.h>
+#include <math.h>
+
+#define INTERPRETER_DEBUG
 
 static VMThread_t* alloc_thread(VM_t* vm){
     xSemaphoreTake(vm->thread_lock, portMAX_DELAY);
@@ -46,12 +49,13 @@ static VMFrame_t* thread_frame_push(VMThread_t* thread, JEEXMethod_t* method){
     return NULL;
 }
 
-static VMFrame_t* thread_frame_pop(VMThread_t* thread){
-    return thread->call_stack.csp > 0 ? &thread->call_stack.frames[--thread->call_stack.csp] : NULL;
+static VMFrame_t* thread_frame_pop(VMThread_t* thread) {
+    VMCallStack_t* cstack = &thread->call_stack;
+    return (cstack->csp == 0 || (--cstack->csp) == 0) ? NULL : &cstack->frames[cstack->csp - 1];
 }
 
 static VMFrame_t* thread_frame_get(VMThread_t* thread){
-    return thread->call_stack.csp > 0 ? &thread->call_stack.frames[thread->call_stack.csp - 1] : NULL;
+    return thread->call_stack.csp == 0 ? NULL : &thread->call_stack.frames[thread->call_stack.csp - 1];
 }
 
 static VMError_t interpret_bytecode(VMThread_t* thread){
@@ -76,6 +80,24 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
         [EJOPCODE_FLOAD_1] = &&EJOPCODE_LOAD32_1,
         [EJOPCODE_FLOAD_2] = &&EJOPCODE_LOAD32_2,
         [EJOPCODE_FLOAD_3] = &&EJOPCODE_LOAD32_3,
+
+        [EJOPCODE_ASTORE] = &&EJOPCODE_STORE32,
+        [EJOPCODE_ASTORE_0] = &&EJOPCODE_STORE32_0,
+        [EJOPCODE_ASTORE_1] = &&EJOPCODE_STORE32_1,
+        [EJOPCODE_ASTORE_2] = &&EJOPCODE_STORE32_2,
+        [EJOPCODE_ASTORE_3] = &&EJOPCODE_STORE32_3,
+
+        [EJOPCODE_ISTORE] = &&EJOPCODE_STORE32,
+        [EJOPCODE_ISTORE_0] = &&EJOPCODE_STORE32_0,
+        [EJOPCODE_ISTORE_1] = &&EJOPCODE_STORE32_1,
+        [EJOPCODE_ISTORE_2] = &&EJOPCODE_STORE32_2,
+        [EJOPCODE_ISTORE_3] = &&EJOPCODE_STORE32_3,
+
+        [EJOPCODE_FSTORE] = &&EJOPCODE_STORE32,
+        [EJOPCODE_FSTORE_0] = &&EJOPCODE_STORE32_0,
+        [EJOPCODE_FSTORE_1] = &&EJOPCODE_STORE32_1,
+        [EJOPCODE_FSTORE_2] = &&EJOPCODE_STORE32_2,
+        [EJOPCODE_FSTORE_3] = &&EJOPCODE_STORE32_3,
 
         [EJOPCODE_ICONST_0] = &&EJOPCODE_ICONST_0,
         [EJOPCODE_ICONST_1] = &&EJOPCODE_ICONST_1,
@@ -104,30 +126,78 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
         [EJOPCODE_IF_ICMPGT] = &&EJOPCODE_IF_ICMPGT,
         [EJOPCODE_IF_ICMPLE] = &&EJOPCODE_IF_ICMPLE,
         [EJOPCODE_IF_ICMPLT] = &&EJOPCODE_IF_ICMPLT,
+
+        [EJOPCODE_IADD] = &&EJOPCODE_IADD,
+        [EJOPCODE_ISUB] = &&EJOPCODE_ISUB,
+        [EJOPCODE_IMUL] = &&EJOPCODE_IMUL,
+        [EJOPCODE_IDIV] = &&EJOPCODE_IDIV,
+        [EJOPCODE_IREM] = &&EJOPCODE_IREM,
+
+        [EJOPCODE_LADD] = &&EJOPCODE_LADD,
+        [EJOPCODE_LSUB] = &&EJOPCODE_LSUB,
+        [EJOPCODE_LMUL] = &&EJOPCODE_LMUL,
+        [EJOPCODE_LDIV] = &&EJOPCODE_LDIV,
+        [EJOPCODE_LREM] = &&EJOPCODE_LREM,
+
+        [EJOPCODE_FADD] = &&EJOPCODE_FADD,
+        [EJOPCODE_FSUB] = &&EJOPCODE_FSUB,
+        [EJOPCODE_FMUL] = &&EJOPCODE_FMUL,
+        [EJOPCODE_FDIV] = &&EJOPCODE_FDIV,
+        [EJOPCODE_FREM] = &&EJOPCODE_FREM,
+
+        [EJOPCODE_DADD] = &&EJOPCODE_DADD,
+        [EJOPCODE_DSUB] = &&EJOPCODE_DSUB,
+        [EJOPCODE_DMUL] = &&EJOPCODE_DMUL,
+        [EJOPCODE_DDIV] = &&EJOPCODE_DDIV,
+        [EJOPCODE_DREM] = &&EJOPCODE_DREM,
+
+        [EJOPCODE_IINC] = &&EJOPCODE_IINC,
+        [EJOPCODE_GOTO] = &&EJOPCODE_GOTO,
     };
 
+    printf("debug method enter: %s, class: %s\n",frame->method->mangled_name, frame->class->name);
+    #ifdef INTERPRETER_DEBUG
+    #define NEXT() ({printf("PC: %zu, NEXT %zu\n ", (size_t)(frame->pc - frame->method->code.bytecode->code), (size_t)(frame->pc - frame->method->code.bytecode->code) + 1 + JOpcode_args_sizes[*frame->pc]);goto *opcode_labels[*(frame->pc += (1 + JOpcode_args_sizes[*frame->pc]))];})
+    #else
     #define NEXT() goto *opcode_labels[*(frame->pc += (1 + JOpcode_args_sizes[*frame->pc]))]
+    #endif
     goto *opcode_labels[*frame->pc];
 
     
     EJOPCODE_LOAD32:
-        *(frame->stack++) = frame->locals[*(frame->pc + 1)];
+        memcpy(frame->stack++, &frame->locals[*(frame->pc + 1)], sizeof(uint32_t));
         NEXT();
 
     
     EJOPCODE_LOAD32_0:
-        *(frame->stack++) = frame->locals[0];
+        memcpy(frame->stack++, &frame->locals[0], sizeof(uint32_t));
         NEXT();
     EJOPCODE_LOAD32_1:
-        *(frame->stack++) = frame->locals[1];
+        memcpy(frame->stack++, &frame->locals[1], sizeof(uint32_t));
         NEXT();
     EJOPCODE_LOAD32_2:
-        *(frame->stack++) = frame->locals[2];
+        memcpy(frame->stack++, &frame->locals[2], sizeof(uint32_t));
         NEXT();
     EJOPCODE_LOAD32_3:
-        *(frame->stack++) = frame->locals[3];
+        memcpy(frame->stack++, &frame->locals[3], sizeof(uint32_t));
         NEXT();
 
+    EJOPCODE_STORE32:
+        memcpy(&frame->locals[*(frame->pc + 1)], --frame->stack, sizeof(uint32_t));
+        NEXT();
+
+    EJOPCODE_STORE32_0:
+        memcpy(&frame->locals[0], --frame->stack, sizeof(uint32_t));
+        NEXT();
+    EJOPCODE_STORE32_1:
+        memcpy(&frame->locals[1], --frame->stack, sizeof(uint32_t));
+        NEXT();
+    EJOPCODE_STORE32_2:
+        memcpy(&frame->locals[2], --frame->stack, sizeof(uint32_t));
+        NEXT();
+    EJOPCODE_STORE32_3:
+        memcpy(&frame->locals[3], --frame->stack, sizeof(uint32_t));
+        NEXT();
 
 
     EJOPCODE_ICONST_0:
@@ -166,9 +236,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
 
     EJOPCODE_RETURN:
         frame = thread_frame_pop(thread);
-        if(frame == NULL) //Root method exit
-            goto exit;
-        printf("return.\n");
+        if(frame == NULL) goto exit; //Root method exit!
         NEXT();
 
     
@@ -213,6 +281,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
         unsigned sz = field->type == EJEEXVT_LONG || field->type == EJEEXVT_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
         void* mem = (thread->vm->static_fields + field->offset);
 
+        field->initialiser = NULL;
         frame->stack -= (sz >> 2);
         memcpy(mem, frame->stack, sz);
 
@@ -238,7 +307,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPEQ:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
@@ -249,7 +318,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPNE:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
@@ -260,7 +329,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPLT:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
@@ -271,7 +340,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPLE:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
@@ -282,7 +351,7 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPGT:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
@@ -293,15 +362,207 @@ static VMError_t interpret_bytecode(VMThread_t* thread){
     }
 
     EJOPCODE_IF_ICMPGE:{
-        int16_t offset = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
         int32_t value2 = *(--frame->stack);
         int32_t value1 = *(--frame->stack);
 
         if(value1 >= value2){
-            printf("Success\n");
             frame->pc += offset;
             goto *opcode_labels[*frame->pc];
         } else NEXT();
+    }
+
+    EJOPCODE_IADD:{
+        int32_t value2 = *(--frame->stack);
+        int32_t value1 = *(--frame->stack);
+
+        *(frame->stack++) = value1 + value2;
+        NEXT();
+    }
+
+    EJOPCODE_ISUB:{
+        int32_t value2 = *(--frame->stack);
+        int32_t value1 = *(--frame->stack);
+
+        *(frame->stack++) = value1 - value2;
+        NEXT();
+    }
+
+    EJOPCODE_IMUL:{
+        int32_t value2 = *(--frame->stack);
+        int32_t value1 = *(--frame->stack);
+
+        *(frame->stack++) = value1 * value2;
+        NEXT();
+    }
+
+    EJOPCODE_IDIV:{
+        int32_t value2 = *(--frame->stack);
+        int32_t value1 = *(--frame->stack);
+
+        *(frame->stack++) = value1 / value2;
+        NEXT();
+    }
+
+    EJOPCODE_IREM:{
+        int32_t value2 = *(--frame->stack);
+        int32_t value1 = *(--frame->stack);
+
+        *(frame->stack++) = value1 % value2;
+        NEXT();
+    }
+
+    EJOPCODE_LADD:{
+        int64_t value2 = *(int64_t*)(frame->stack -= 2);
+        int64_t value1 = *(int64_t*)(frame->stack -= 2);
+
+        *(int64_t*)(frame->stack) = value1 + value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_LSUB:{
+        int64_t value2 = *(int64_t*)(frame->stack -= 2);
+        int64_t value1 = *(int64_t*)(frame->stack -= 2);
+
+        *(int64_t*)(frame->stack) = value1 - value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_LMUL:{
+        int64_t value2 = *(int64_t*)(frame->stack -= 2);
+        int64_t value1 = *(int64_t*)(frame->stack -= 2);
+
+        *(int64_t*)(frame->stack) = value1 * value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_LDIV:{
+        int64_t value2 = *(int64_t*)(frame->stack -= 2);
+        int64_t value1 = *(int64_t*)(frame->stack -= 2);
+
+        *(int64_t*)(frame->stack) = value1 / value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_LREM:{
+        int64_t value2 = *(int64_t*)(frame->stack -= 2);
+        int64_t value1 = *(int64_t*)(frame->stack -= 2);
+
+        *(int64_t*)(frame->stack) = value1 % value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_FADD:{
+        float value2 = *(float*)(--frame->stack);
+        float value1 = *(float*)(--frame->stack);
+
+        *(float*)(frame->stack++) = value1 + value2;
+        NEXT();
+    }
+
+    EJOPCODE_FSUB:{
+        float value2 = *(float*)(--frame->stack);
+        float value1 = *(float*)(--frame->stack);
+
+        *(float*)(frame->stack++) = value1 - value2;
+        NEXT();
+    }
+
+    EJOPCODE_FMUL:{
+        float value2 = *(float*)(--frame->stack);
+        float value1 = *(float*)(--frame->stack);
+
+        *(float*)(frame->stack++) = value1 * value2;
+        NEXT();
+    }
+
+    EJOPCODE_FDIV:{
+        float value2 = *(float*)(--frame->stack);
+        float value1 = *(float*)(--frame->stack);
+
+        *(float*)(frame->stack++) = value1 / value2;
+        NEXT();
+    }
+
+    EJOPCODE_FREM:{
+        float value2 = *(float*)(--frame->stack);
+        float value1 = *(float*)(--frame->stack);
+
+        *(float*)(frame->stack++) = fmod(value1, value2);
+        NEXT();
+    }
+
+    EJOPCODE_DADD:{
+        double value2 = *(double*)(frame->stack -= 2);
+        double value1 = *(double*)(frame->stack -= 2);
+
+        *(double*)(frame->stack) = value1 + value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_DSUB:{
+        double value2 = *(double*)(frame->stack -= 2);
+        double value1 = *(double*)(frame->stack -= 2);
+
+        *(double*)(frame->stack) = value1 - value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_DMUL:{
+        double value2 = *(double*)(frame->stack -= 2);
+        double value1 = *(double*)(frame->stack -= 2);
+
+        *(double*)(frame->stack) = value1 * value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_DDIV:{
+        double value2 = *(double*)(frame->stack -= 2);
+        double value1 = *(double*)(frame->stack -= 2);
+
+        *(double*)(frame->stack) = value1 / value2;
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_DREM:{
+        double value2 = *(double*)(frame->stack -= 2);
+        double value1 = *(double*)(frame->stack -= 2);
+
+        *(double*)(frame->stack) = fmod(value1,value2);
+        
+        frame->stack += 2;
+        NEXT();
+    }
+
+    EJOPCODE_IINC:{
+        uint8_t index = *(frame->pc + 1);
+        int8_t constant = *(frame->pc + 2);
+
+        frame->locals[index] += constant;
+        NEXT();
+    }
+
+    EJOPCODE_GOTO:{
+        frame->pc += (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        goto *opcode_labels[*frame->pc];
     }
 
 exit:
