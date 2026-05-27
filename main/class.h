@@ -1,143 +1,202 @@
 #pragma once
-#include "loader.h"
+
+#include <stdint.h>
+#include "list.h"
+
+#define MAX_LOADED_CLASSES 1024
+typedef struct Class_t Class_t;
 
 typedef enum{
-    EJVT_BYTE = 'B',
-    EJVT_CHAR = 'C',
-    EJVT_DOUBLE = 'D',
-    EJVT_FLOAT = 'F',
-    EJVT_INT = 'I',
-    EJVT_LONG = 'J',
-    EJVT_REFERENCE = 'L',
-    EJVT_SHORT = 'S',
-    EJVT_BOOL = 'Z',
-    EJVT_VOID = 'V',
-}JValueType_t;
-typedef struct JClass_t JClass_t;
+    TYPE_BYTE = 'B',
+    TYPE_CHAR = 'C',
+    TYPE_DOUBLE = 'D',
+    TYPE_FLOAT = 'F',
+    TYPE_INT = 'I',
+    TYPE_LONG = 'J',
+    TYPE_SHORT = 'S',
+    TYPE_BOOL = 'Z',
+    TYPE_VOID = 'V',
+    TYPE_HANDLE = 'L',
+}JavaFieldType_t;
 
-typedef struct{
-    uint32_t ID;
-
-    char* name; //This name is not java's raw name, it is name@description
-    JClass_t* owner;
-
-    union{
-        uint32_t flags;
-        struct{
-            bool is_static:1;
-            bool is_alligned:1; //I think this would be used in future to decide should we enter or not critical section
-            bool is_unitialised:1; //This flags will be only set if: field is static, field have constantValue attribute
-                                   //If this flags set, getstatic should initialise memory leading to this field with value from constvalue
-                                   //Based on fields type
-        };
-    }flags;
-    void* constvalue; //Point somewhere meaningfull only if is_unitialised == 1
-
-    JValueType_t type;
-    unsigned offset;
-}JField_t;
-
-typedef struct{
-    JValueType_t return_type;
-    JValueType_t* argument_types;
-    uint8_t arguments_count;
-}JMethodPrototype_t;
-
-typedef struct JMethod_t{
-    uint32_t ID;
-
-    char* name; //This name is not java's raw name, it is name@description
-    uint16_t vtable_index; //valid when is_static == 0
-
-    JClass_t* owner;
-    JMethodPrototype_t prototype;
-
-    union{
-        uint32_t flags;
-        struct{
-            bool is_set:1; //This is for internal linker purposes
-            bool is_static:1;
-            bool is_native:1;
-            bool is_frominterface:1;
-            bool is_final:1;
-        };
-    }flags;
-
-    union{
-        JCodeAttribute_t* bytecode; //valid if not native
-        uint32_t native_id; //valid if native....
-    }code;
-}JMethod_t;
-
-typedef struct{
-    unsigned count;
-    JMethod_t** methods;
-}JMethodTable_t;
-
-typedef struct{
-    unsigned count;
-    JField_t** fields;
-}JFieldTable_t;
-
-typedef struct JLinker_t JLinker_t;
-
-enum{
-    EJRCT_NULL, //nothinh
-    EJRCT_STRING, //JRawUTF8_t*
-    EJRCT_INT, //uint32_t*
-    EJRCT_LONG, //uint64_t*
-    EJRCT_FLOAT, //float*
-    EJRCT_DOUBLE, //double*
-    EJRCT_CLASS, //JClass_t*
-    EJRCT_FIELD, //JField_t*
-    EJRCT_METHOD, //JMethod_t*
-    EJRCT_INTERFACEMETHODREF, //JMethod_t*
-};
-
-typedef struct{
-    uint16_t class_index; //Class index is index from raw class file!
-    uint8_t symbol_type;
-    void* value;
-}JClassSymbol_t;
-
-typedef struct{
-    uint16_t length;
-    JClassSymbol_t* symbols;
-}JClassSymtab_t;
-
-typedef struct JClass_t{
-    uint32_t ID;
-
-    struct list_head list; //Used to store class in class_list of linker.
-    struct list_head as_child; //Used to store class in child_list of parent. 
-    struct list_head children; //Used to store subclasses in it.
-
-    char* name;
-    JClass_t* parent;
-    JLinker_t* linker;
-
-    union{
-        uint32_t flags;
-        struct{
-            bool is_final:1;
-            bool is_initialised:1;
-        };
-    }flags;
+typedef enum{
+    SYMBOL_NONE,
     
+    //Proxy symbol are to be resolved in runtime stubs
+    PROXY_SYMBOL_CLASS,
+    PROXY_SYMBOL_STRING,
+    PROXY_SYMBOL_METHOD,
+    PROXY_SYMBOL_IMETHOD,
+    PROXY_SYMBOL_FIELD,
+    //================================================
+
+    SYMBOL_CLASS,
+    SYMBOL_STRING,
+    SYMBOL_INT,
+    SYMBOL_FLOAT,
+    SYMBOL_LONG,
+    SYMBOL_DOUBLE,
+    SYMBOL_METHOD,
+    SYMBOL_IMETHOD,
+    SYMBOL_FIELD,
+}SymbolType_t;
+
+typedef struct{
+    uint16_t name_id;
+    JavaFieldType_t type; //Still store type separately for faster opcodes on resolved fields
+    size_t offset;
+    uint8_t size;
+
+    void* constantvalue; //If non NULL getstatic / putstatic must initialise field with that value then set to NULL! Will lead to ClassSymbol_t* 
+                         //So if constantpool entry was resolved, and this field wasnt initalised yet, we can use resolved value and vise-versa
+}Field_t;
+
+typedef struct{
+    size_t count;
+    Field_t* fields;
+}FieldTable_t;
+
+typedef struct{
+    size_t count;
+    Class_t** implements;
+}ImplementsTable_t;
+
+typedef struct{
+    struct list_head list; //Since this probably gonna be inside temporary arena, we might use a list
+    unsigned cp_index;
+    unsigned symtab_index;
+}ConstantPoolPatchSymbol_t;
+
+typedef struct{
+    SymbolType_t type;
+    void* value;
+}ClassSymbol_t;
+
+typedef struct{
     struct{
-        uint16_t count;
-        JClass_t** implement;
-    }interfaces;
+        union{
+            uint32_t flags;
+            struct{
+                unsigned is_method_private:1; //If 1 - search in special_methods
+                unsigned is_method_virtual:1; //if 1 - use vtable
+                                              //if both 0 search in static_methods
+            };
+        };
+    }flags; 
 
-    JClassSymtab_t symtab; //Constant pool but eats less memory!
-    JMethodTable_t vtable; //Vtable for instance methods
-    size_t ifields_size; //Ammount of memory required for ifields of this object
+    uint16_t origin_name_id;
+    uint16_t self_name_id;
+}ClassProxySymbol_t;
 
+typedef struct{
+    size_t count;
+    ClassSymbol_t* symbols;
+}ClassSymbolTable_t;
+
+typedef struct{
+    uint16_t name_id;
+    uint16_t vtable_index;
+    struct{
+        union{
+            uint32_t flags;
+            struct{
+                unsigned is_static:1;
+                unsigned is_native:1;
+            };
+        };
+    }flags; 
+
+    size_t return_size;
+    size_t arguments_size;
+
+    void* code;
+}Method_t;
+
+typedef struct{
+    uint16_t start_pc;
+    uint16_t end_pc;
+
+    uint16_t handler_pc;
+    ClassSymbol_t* type;
+}MethodExceptionHandler_t;
+
+typedef struct{
+    uint16_t max_stack;
+    uint16_t max_locals;
+
+    uint32_t code_length;
+    uint8_t* code;
+
+    size_t exception_count;
+    MethodExceptionHandler_t* exceptions;
+}MethodBytecode_t;
+
+typedef struct{
+    size_t count;
+    Method_t* methods;
+}MethodTable_t;
+
+typedef struct{
+    uint8_t is_root; //Only set to 1 if class have no parent!
+    uint16_t parent_name_id;
+    
+    size_t implements_count;
+    uint16_t* implements; //name_ids
+
+    struct list_head cp_patch_list;
+}ClassLinkTimeMetadata_t;
+
+typedef struct Class_t{
+    //Linker info
+    struct list_head list; //Required for link-time hierarchy building
     void* metadata;
-}JClass_t;
 
-//Class index is index from raw class file!
-JClassSymbol_t* JClassSymtab_get_symbol(JClassSymtab_t* symtab, uint16_t class_index);
+    //Class info
+    uint16_t name_id;
+    Class_t* parent;
+    ImplementsTable_t implements;
+    ClassSymbolTable_t symtab;
 
-//Return index of symbol in symbol table
-unsigned JClassSymtab_indexof(JClassSymtab_t* symtab, JClassSymbol_t* symbol);
+    struct{
+        union{
+            uint32_t flags;
+            struct{
+                unsigned is_linked:1;
+                unsigned is_interface:1;
+
+                //TODO: other flags
+            };
+        };
+    }flags;
+
+    //Fields info
+    //Separated to simplify GC scan logic.
+    FieldTable_t instance_fields;
+    FieldTable_t static_fields;
+
+    size_t object_size; //Parent sizes + self size
+    uint8_t* static_fields_storage;
+
+    //Method info
+    //TODO: methods structure
+    MethodTable_t instance_methods;
+    MethodTable_t static_methods;
+    MethodTable_t special_methods;
+
+    size_t vtable_size;
+    Method_t** vtable;
+}Class_t;
+
+typedef struct{
+    Class_t* classes[1024];
+}ClassTable_t;
+
+void classes_init();
+
+Class_t* class_find(uint16_t name_id);
+int class_insert(Class_t* class);
+Method_t* class_find_static_method(Class_t* class, uint16_t name_id);
+Method_t* class_find_special_method(Class_t* class, uint16_t name_id);
+Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id);
+
+int class_link(Class_t* class);

@@ -1,8 +1,9 @@
 #pragma once
+
 #include "list.h"
 #include "bumper.h"
 #include "jerror.h"
-#include "memstream.h"
+#include "stream.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -100,7 +101,6 @@ typedef struct{
 }JRawMethod_t;
 
 typedef struct{
-    struct list_head list;
     union{
         uint32_t full_version;
         struct{
@@ -147,11 +147,7 @@ typedef enum{
 	ACC_STRICT = 0x08000,
 }JRawFlags_t;
 
-typedef struct{
-    bump_allocator_t* arena;
-    struct list_head classes;
-}JLoader_t;
+void parser_init();
 
-JConstant_t* JConstantPool_get(JConstantPool_t* constantpool, unsigned index);
-int JLoader_init(JLoader_t* loader, bump_allocator_t* arena);
-JError_t JLoader_load(JLoader_t* loader, memstream_t* stream);
+JConstant_t* parser_constantpool_get(JConstantPool_t* constantpool, unsigned index);
+JRawClass_t* parse_class(ClassStream_t* stream);

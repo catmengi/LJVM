@@ -1,58 +1,23 @@
-#include "bumper.h"
+#include "config.h"
+#include "parser.h"
+#include "stringpool.h"
 #include "class.h"
-#include "jeex_builder.h"
-#include "linker.h"
-#include "preloader.h"
-#include "vm.h"
 
-#include <string.h>
+#include <stdio.h>
+#include <assert.h>
 
-void app_main(){
-    bump_allocator_t arena = {0};
-    bumper_create(&arena,2 * 1024 * 1024);
+extern Class_t* class_convert_from_raw(JRawClass_t* parsed_class);
+extern int class_link(Class_t* class);
 
-    JLoader_t loader = {0};
-    JLoader_init(&loader,&arena);
-    JPreloader_load_builtins(&loader);
+int main(){
+    JEspresso_init();
 
-    JLinker_t linker = {0};
-    JLinker_init(&linker,&loader,&arena);
-    JLinker_link(&linker);
+    FILE* class = fopen("java_src/dummy.class", "rb");
+    assert(class);
 
+    JRawClass_t* parsed_class = parse_class(class);
+    Class_t* jeclass = class_convert_from_raw(parsed_class);
+    assert(jeclass);
 
-    //JCompiler_t compiler = {0};
-    //JCompiler_init(&compiler,&linker,"/sd/abcd_app");
-    //JCompiler_start(&compiler);
-
-    JClass_t* dummy = JClass_get(&linker, "dummy");
-    assert(dummy);
-
-    JField_t* b = JClass_get_field(dummy, "b@J");
-    JField_t* bi = JClass_get_field(dummy, "bi@I");
-    JField_t* c = JClass_get_field(dummy, "c@F");
-
-    JMethod_t* init = JClass_get_method(dummy, "<init>@()V");
-    JMethod_t* main = JClass_get_method(dummy, "main@([Ljava/lang/String;)V");
-    assert(init && main);
-    printf("init: %s\n",init->name);
-    printf("main: %s\n", main->name);
-
-    assert(b && bi && c);
-    assert(strcmp(b->name, "b@J") == 0);
-    assert(strcmp(bi->name, "bi@I") == 0);
-    assert(strcmp(c->name, "c@F") == 0);
-
-    printf("b: %p\n",b->constvalue);
-    printf("bi: %p\n",bi->constvalue);
-    printf("c: %f\n",*(float*)c->constvalue);
-
-    JEEXBuilder_t jeex_builder = {0};
-    JEEXBuilder_init(&jeex_builder, &linker, &arena);
-    assert(JEEXBuilder_build(&jeex_builder) == JERR_OK);
-
-    VM_t* vm = malloc(sizeof(*vm));;
-    printf("vm: %p\n",vm);
-    VM_init(vm, jeex_builder.jeex);
-    VM_start(vm, "dummy");
-    printf("used memory: %zu\n",bumper_alloc(&arena,0) - bumper_arena_start(&arena));
+    assert(class_link(jeclass) == 0);
 }
