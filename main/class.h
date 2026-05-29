@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "list.h"
+#include "jerror.h"
 
 #define MAX_LOADED_CLASSES 1024
 typedef struct Class_t Class_t;
@@ -73,17 +74,6 @@ typedef struct{
 }ClassSymbol_t;
 
 typedef struct{
-    struct{
-        union{
-            uint32_t flags;
-            struct{
-                unsigned is_method_private:1; //If 1 - search in special_methods
-                unsigned is_method_virtual:1; //if 1 - use vtable
-                                              //if both 0 search in static_methods
-            };
-        };
-    }flags; 
-
     uint16_t origin_name_id;
     uint16_t self_name_id;
 }ClassProxySymbol_t;
@@ -100,7 +90,6 @@ typedef struct{
         union{
             uint32_t flags;
             struct{
-                unsigned is_static:1;
                 unsigned is_native:1;
             };
         };
@@ -194,9 +183,11 @@ typedef struct{
 void classes_init();
 
 Class_t* class_find(uint16_t name_id);
-int class_insert(Class_t* class);
-Method_t* class_find_static_method(Class_t* class, uint16_t name_id);
-Method_t* class_find_special_method(Class_t* class, uint16_t name_id);
-Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id);
+Error_t class_insert(Class_t* klass);
 
-int class_link(Class_t* class);
+Method_t* class_find_static_method(Class_t* klass, uint16_t name_id);
+Method_t* class_find_special_method(Class_t* klass, uint16_t name_id);
+Method_t* class_find_virtual_method(Class_t* klass, uint16_t name_id);
+
+//ALARM: it does loading AND linking
+Error_t class_load_bynameid(uint16_t name_id, Class_t** out);

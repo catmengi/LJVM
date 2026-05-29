@@ -249,9 +249,11 @@ exit:
 
 
 
-JRawClass_t* parse_class(ClassStream_t* stream){
+JRawClass_t* parser_parse_class(ClassStream_t* stream){
     bumper_reset(&s_parser_arena);
     JRawClass_t* ret = NULL;
+
+    FAIL_SET_JUMP(stream, ret, NULL, exit);
 
     uint32_t magic = 0;
     FAIL_SET_JUMP(classstream_readU32(stream,&magic) == 0,ret, NULL,exit);
@@ -282,9 +284,6 @@ JRawClass_t* parse_class(ClassStream_t* stream){
 
         if(constant->type == EJCT_DOUBLE || constant->type == EJCT_LONG) i++;
     }
-
-    printf("did start?\n");
-
 
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->flags) == 0,ret, NULL,exit);
 

@@ -6,18 +6,10 @@
 #include <stdio.h>
 #include <assert.h>
 
-extern Class_t* class_convert_from_raw(JRawClass_t* parsed_class);
-extern int class_link(Class_t* class);
-
 int main(){
     JEspresso_init();
 
-    FILE* class = fopen("java_src/dummy.class", "rb");
-    assert(class);
+    Class_t* out = NULL;
+    assert(class_load_bynameid(stringpool_add("dummy"), &out) == JERR_OK);
 
-    JRawClass_t* parsed_class = parse_class(class);
-    Class_t* jeclass = class_convert_from_raw(parsed_class);
-    assert(jeclass);
-
-    assert(class_link(jeclass) == 0);
 }

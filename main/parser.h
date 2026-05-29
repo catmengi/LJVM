@@ -150,4 +150,4 @@ typedef enum{
 void parser_init();
 
 JConstant_t* parser_constantpool_get(JConstantPool_t* constantpool, unsigned index);
-JRawClass_t* parse_class(ClassStream_t* stream);
+JRawClass_t* parser_parse_class(ClassStream_t* stream);
