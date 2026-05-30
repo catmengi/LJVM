@@ -618,7 +618,7 @@ Error_t class_link(Class_t* class){
         if(cur_class->flags.is_linked) break;
 
         ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
-        if(!metadata->is_root){
+        if(!metadata->is_root && !(cur_class->parent = class_find(metadata->parent_name_id))){
             FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(metadata->parent_name_id)), &cur_class->parent)) == JERR_OK, err, err, exit);
             cur_class = cur_class->parent;
         } else break;
