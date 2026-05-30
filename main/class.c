@@ -610,9 +610,7 @@ Error_t class_link(Class_t* class){
     Error_t err = JERR_OK;
     LIST_HEAD(hierarchy_list);
 
-    if(deepness++ == 0)
-        bumper_reset(&s_temporary_arena);
-
+    deepness++;
 
     Class_t* cur_class = class;
     while(cur_class){
@@ -633,6 +631,7 @@ Error_t class_link(Class_t* class){
     }
 
 exit:
-    deepness--;
+    if(--deepness == 0)
+        bumper_reset(&s_temporary_arena);
     return err;
 }
