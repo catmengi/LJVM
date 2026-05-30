@@ -511,7 +511,6 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     assert(out);
 
     if((*out = class_find(name_id))) return JERR_OK;
-    bumper_reset(&s_temporary_arena);
 
     FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(name_id)), out)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((err = class_link(*out)) == JERR_OK, err, err, exit);
@@ -611,7 +610,10 @@ Error_t class_link(Class_t* class){
     Error_t err = JERR_OK;
     LIST_HEAD(hierarchy_list);
 
-    deepness++;
+    if(deepness++ == 0)
+        bumper_reset(&s_temporary_arena);
+
+
     Class_t* cur_class = class;
     while(cur_class){
         list_add(&cur_class->list, &hierarchy_list);
@@ -631,7 +633,6 @@ Error_t class_link(Class_t* class){
     }
 
 exit:
-    if(--deepness == 0)
-        bumper_reset(&s_temporary_arena);
+    deepness--;
     return err;
 }
