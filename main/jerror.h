@@ -6,6 +6,7 @@ typedef enum{
     JERR_BADPARAM,
     JERR_UNKNOWN,
     JERR_NOTFOUND,
+    JERR_NOCLASSDEF,
 }Error_t;
 
 #define __FSJ_DO_BREAK__

@@ -9,3 +9,4 @@ typedef struct{
 }BuiltinClassEntry_t;
 
 JRawClass_t* loader_load_class(char* name);
+int loader_set_loadpath(char* path);

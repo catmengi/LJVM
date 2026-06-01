@@ -7,6 +7,7 @@
 #include "parser.h"
 #include "bumper.h"
 #include "stringpool.h"
+#include "native_methods_service.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -85,6 +86,35 @@ exit:
     return err;
 }
 
+static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out);
+static Error_t class_link(Class_t* class);
+Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
+    Error_t err = JERR_OK;
+    assert(out);
+
+    if((*out = class_find(name_id))) return JERR_OK;
+
+    char* string_name = stringpool_get(name_id);
+    if(string_name[0] == '['){
+        Class_t* jlObject = NULL;
+        FAIL_SET_JUMP((err = class_load_bynameid(name_id, &jlObject)) == JERR_OK, err, err, exit);
+
+        Class_t* array_class = bumper_calloc(&s_permament_arena, 1, sizeof(*array_class));
+        FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
+
+        memcpy(array_class, jlObject, sizeof(*jlObject));
+        array_class->name_id = name_id;
+
+        FAIL_SET_JUMP((err = class_insert(array_class)) == JERR_OK, err, err, exit);
+    } else {
+        FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(string_name), out)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_link(*out)) == JERR_OK, err, err, exit);
+    }
+
+exit:
+    return err;
+}
+
 static unsigned class_field_sizeof(JavaFieldType_t type){
     return type == TYPE_VOID ? 0 : type == TYPE_LONG || type == TYPE_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
 }
@@ -117,6 +147,8 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
             patch_sym->symtab_index = symtab_index++;
 
             list_add(&patch_sym->list, cp_convert_list);
+
+            if(constant->type == EJCT_LONG || constant->type == EJCT_DOUBLE) i++;
         }
     }
 
@@ -405,36 +437,21 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     this_class->object_size = offsets[0]; //Will will use this also on linker stage to calculate proper offsets
 
-    size_t special_count = 0;
-    size_t methods_count[2] = {0};
-    for(unsigned i = 0; i < parsed_class->methods_count; i++){
-        JRawMethod_t* raw_method = &parsed_class->methods[i];
-        if((raw_method->flags & ACC_PRIVATE) != ACC_PRIVATE && strcmp((char*)((JRawUTF8_t*)parser_constantpool_get(constantpool, raw_method->name_index)->value)->string, "<init>") != 0){
-            methods_count[(raw_method->flags & ACC_STATIC) == ACC_STATIC]++;
-        } else special_count++;
-    }
+    this_class->methods.count = parsed_class->methods_count;
+    this_class->methods.methods = bumper_calloc(&s_permament_arena, this_class->methods.count, sizeof(*this_class->methods.methods));
+    FAIL_SET_JUMP(this_class->methods.methods, err, JERR_OOM, exit);
 
-    this_class->instance_methods.count = methods_count[0];
-    this_class->static_methods.count = methods_count[1];
-    this_class->special_methods.count = special_count; 
-
-
-    this_class->special_methods.methods = bumper_calloc(&s_permament_arena, this_class->special_methods.count, sizeof(*this_class->special_methods.methods));
-    this_class->instance_methods.methods = bumper_calloc(&s_permament_arena, this_class->instance_methods.count, sizeof(*this_class->instance_methods.methods));
-    this_class->static_methods.methods = bumper_calloc(&s_permament_arena, this_class->static_methods.count, sizeof(*this_class->static_methods.methods));
-    FAIL_SET_JUMP(this_class->instance_methods.methods && this_class->static_methods.methods && this_class->special_methods.methods, err, JERR_OOM, exit);
-
-    unsigned special_index = 0;
-    unsigned method_index[3] = {0};
     for(unsigned i = 0; i < parsed_class->methods_count; i++){
         JRawMethod_t* raw_method = &parsed_class->methods[i];
         bool is_static = (raw_method->flags & ACC_STATIC) == ACC_STATIC;
         bool is_special = (raw_method->flags & ACC_PRIVATE) == ACC_PRIVATE || strcmp((char*)((JRawUTF8_t*)parser_constantpool_get(constantpool, raw_method->name_index)->value)->string, "<init>") == 0;
 
-        Method_t* method_array = is_static ? this_class->static_methods.methods : is_special ? this_class->special_methods.methods : this_class->instance_methods.methods;
-        Method_t* method = &method_array[is_special ? special_index++ : method_index[is_static]++];
+        Method_t* method = &this_class->methods.methods[i];
 
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
+        method->flags.is_static = is_static;
+        method->flags.is_virtual = !(is_static || is_special);
+        method->flags.is_special = is_special;
         
         JConstant_t* raw_method_descriptor = parser_constantpool_get(constantpool, raw_method->descriptor_index);
         JConstant_t* raw_method_name = parser_constantpool_get(constantpool, raw_method->name_index);
@@ -459,7 +476,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->arguments_size = 0; //TODO
         
         if(method->flags.is_native){
-            printf("TODO: native method lookup\n");
+            FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
         } else {
             JRawAttribute_t* attribute = NULL;
             list_for_each_entry(attribute, &raw_method->attributes, list){
@@ -505,42 +522,6 @@ exit:
     return err;
 }
 
-Error_t class_link(Class_t* class);
-Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
-    Error_t err = JERR_OK;
-    assert(out);
-
-    if((*out = class_find(name_id))) return JERR_OK;
-
-    FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(name_id)), out)) == JERR_OK, err, err, exit);
-    FAIL_SET_JUMP((err = class_link(*out)) == JERR_OK, err, err, exit);
-
-exit:
-    return err;
-}
-
-Method_t* class_find_static_method(Class_t* class, uint16_t name_id){
-    MethodTable_t* table = &class->static_methods;
-    for(unsigned i = 0; i < table->count; i++){
-        Method_t* method = &table->methods[i];
-        if(method->name_id == name_id)
-            return method;
-    }
-
-    return NULL;
-}
-
-Method_t* class_find_special_method(Class_t* class, uint16_t name_id){
-    MethodTable_t* table = &class->special_methods;
-    for(unsigned i = 0; i < table->count; i++){
-        Method_t* method = &table->methods[i];
-        if(method->name_id == name_id)
-            return method;
-    }
-
-    return NULL;
-}
-
 Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id){
     for(unsigned i = 0; i < class->vtable_size; i++){
         Method_t* method = class->vtable[i];
@@ -551,8 +532,31 @@ Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
-static unsigned count_methods(Class_t* class, bool is_static){
-    return is_static ? class->static_methods.count : class->instance_methods.count;
+Error_t class_resolv_symbol(ClassSymbol_t* symbol){
+    Error_t err = JERR_OK;
+
+    if(symbol->type < PROXY_SYMBOL_CLASS) return JERR_OK;
+
+    ClassProxySymbol_t* proxy_symbol = symbol->value;
+    
+    Class_t* origin = NULL;
+    FAIL_SET_JUMP((err = class_load_bynameid(proxy_symbol->origin_name_id, &origin)) == JERR_OK,err,err,exit);
+
+    switch(symbol->type){
+        case PROXY_SYMBOL_CLASS:{
+            symbol->type = SYMBOL_CLASS;
+            symbol->value = origin;
+        }
+        break;
+
+        case PROXY_SYMBOL_FIELD:{
+
+        }
+        break;
+    }
+
+exit:
+    return err;
 }
 
 static Error_t class_fix_hierarchy(Class_t* this_class){
@@ -570,8 +574,11 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
 
     //Generate vtable
     this_class->vtable_size = parent ? parent->vtable_size : 0;
-    for(unsigned i = 0; i < this_class->instance_methods.count; i++){
-        this_class->vtable_size += parent ? class_find_virtual_method(parent, this_class->instance_methods.methods[i].name_id) == NULL : 1;
+    for(unsigned i = 0; i < this_class->methods.count; i++){
+        Method_t* method = &this_class->methods.methods[i];
+        if(method->flags.is_virtual){
+            this_class->vtable_size += parent ? class_find_virtual_method(parent, method->name_id) == NULL : 1;
+        }
     }
 
     this_class->vtable = bumper_calloc(&s_permament_arena, this_class->vtable_size, sizeof(*this_class->vtable));
@@ -580,15 +587,17 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     unsigned vtable_index = parent ? parent->vtable_size : 0;
     if(parent) memcpy(this_class->vtable, parent->vtable, sizeof(*this_class->vtable) * vtable_index);
 
-    for(unsigned i = 0; i < this_class->instance_methods.count; i++){
-        Method_t* method = &this_class->instance_methods.methods[i];
-        Method_t* overriden = parent ? class_find_virtual_method(parent, method->name_id) : NULL;
-        if(overriden){
-            method->vtable_index = overriden->vtable_index;
-            this_class->vtable[method->vtable_index] = method;
-        } else {
-            method->vtable_index = vtable_index++;
-            this_class->vtable[method->vtable_index] = method;
+    for(unsigned i = 0; i < this_class->methods.count; i++){
+        Method_t* method = &this_class->methods.methods[i];
+        if(method->flags.is_virtual){
+            Method_t* overriden = parent ? class_find_virtual_method(parent, method->name_id) : NULL;
+            if(overriden){
+                method->vtable_index = overriden->vtable_index;
+                this_class->vtable[method->vtable_index] = method;
+            } else {
+                method->vtable_index = vtable_index++;
+                this_class->vtable[method->vtable_index] = method;
+            }
         }
     }
     this_class->flags.is_linked = 1;
@@ -605,7 +614,7 @@ exit:
     return 0;
 }
 
-Error_t class_link(Class_t* class){
+static Error_t class_link(Class_t* class){
     static unsigned deepness = 0;
     Error_t err = JERR_OK;
     LIST_HEAD(hierarchy_list);
@@ -619,6 +628,7 @@ Error_t class_link(Class_t* class){
 
         ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
         if(!metadata->is_root && !(cur_class->parent = class_find(metadata->parent_name_id))){
+            //Using raw API to make it work properly
             FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(metadata->parent_name_id)), &cur_class->parent)) == JERR_OK, err, err, exit);
             cur_class = cur_class->parent;
         } else break;

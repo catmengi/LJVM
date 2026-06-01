@@ -13,7 +13,7 @@ static BuiltinClassEntry_t* builtin_classes[] = {
 };
 
 static char s_path[256] = {0};
-static char s_app_classpath[256] = "java_src";
+static char s_app_classpath[256] = {0};
 static memstream_t s_memstream = {0};
 
 static bool is_system_class(char* class_name){
@@ -47,5 +47,12 @@ JRawClass_t* loader_load_class(char* name){
     if(init_classtream(name, &stream)) return NULL;
 
     return parser_parse_class(&stream);
+}
+
+int loader_set_loadpath(char* path){
+    if(!path || strlen(path) >= sizeof(s_app_classpath)) return 1;
+    strncpy(s_app_classpath, path, sizeof(s_app_classpath));
+
+    return 1;
 }
 

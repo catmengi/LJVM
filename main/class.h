@@ -24,14 +24,14 @@ typedef enum{
     SYMBOL_NONE,
     
     //Proxy symbol are to be resolved in runtime stubs
-    PROXY_SYMBOL_CLASS,
+    PROXY_SYMBOL_CLASS = 10,
     PROXY_SYMBOL_STRING,
     PROXY_SYMBOL_METHOD,
     PROXY_SYMBOL_IMETHOD,
     PROXY_SYMBOL_FIELD,
     //================================================
 
-    SYMBOL_CLASS,
+    SYMBOL_CLASS = 1,
     SYMBOL_STRING,
     SYMBOL_INT,
     SYMBOL_FLOAT,
@@ -91,6 +91,9 @@ typedef struct{
             uint32_t flags;
             struct{
                 unsigned is_native:1;
+                unsigned is_static:1;
+                unsigned is_special:1;
+                unsigned is_virtual:1;
             };
         };
     }flags; 
@@ -168,9 +171,7 @@ typedef struct Class_t{
 
     //Method info
     //TODO: methods structure
-    MethodTable_t instance_methods;
-    MethodTable_t static_methods;
-    MethodTable_t special_methods;
+    MethodTable_t methods;
 
     size_t vtable_size;
     Method_t** vtable;
@@ -185,8 +186,6 @@ void classes_init();
 Class_t* class_find(uint16_t name_id);
 Error_t class_insert(Class_t* klass);
 
-Method_t* class_find_static_method(Class_t* klass, uint16_t name_id);
-Method_t* class_find_special_method(Class_t* klass, uint16_t name_id);
 Method_t* class_find_virtual_method(Class_t* klass, uint16_t name_id);
 
 //ALARM: it does loading AND linking
