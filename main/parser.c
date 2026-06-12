@@ -13,9 +13,13 @@
 #define JMAGIC 0xCAFEBABE
 
 static bump_allocator_t s_parser_arena = {0}; 
+static bool s_initalised = false;
 
 void parser_init(){
-    assert(bumper_create(&s_parser_arena, PARSER_ARENA) == 0);
+    if(!s_initalised){
+        assert(bumper_create(&s_parser_arena, PARSER_ARENA) == 0);
+        s_initalised = true;
+    } else bumper_reset(&s_parser_arena);
 }
 
 static Error_t init_constantpool(JConstantPool_t* constantpool, unsigned size, bump_allocator_t* allocate_from){

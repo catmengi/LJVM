@@ -22,14 +22,6 @@ typedef enum{
 
 typedef enum{
     SYMBOL_NONE,
-    
-    //Proxy symbol are to be resolved in runtime stubs
-    PROXY_SYMBOL_CLASS = 10,
-    PROXY_SYMBOL_STRING,
-    PROXY_SYMBOL_METHOD,
-    PROXY_SYMBOL_IMETHOD,
-    PROXY_SYMBOL_FIELD,
-    //================================================
 
     SYMBOL_CLASS = 1,
     SYMBOL_STRING,
@@ -38,29 +30,16 @@ typedef enum{
     SYMBOL_LONG,
     SYMBOL_DOUBLE,
     SYMBOL_METHOD,
-    SYMBOL_IMETHOD,
     SYMBOL_FIELD,
+
+    //Proxy symbol are to be resolved in runtime
+    PROXY_SYMBOL_CLASS = 10,
+    PROXY_SYMBOL_STRING,
+    PROXY_SYMBOL_METHOD,
+    PROXY_SYMBOL_FIELD,
+    //================================================
+
 }SymbolType_t;
-
-typedef struct{
-    uint16_t name_id;
-    JavaFieldType_t type; //Still store type separately for faster opcodes on resolved fields
-    size_t offset;
-    uint8_t size;
-
-    void* constantvalue; //If non NULL getstatic / putstatic must initialise field with that value then set to NULL! Will lead to ClassSymbol_t* 
-                         //So if constantpool entry was resolved, and this field wasnt initalised yet, we can use resolved value and vise-versa
-}Field_t;
-
-typedef struct{
-    size_t count;
-    Field_t* fields;
-}FieldTable_t;
-
-typedef struct{
-    size_t count;
-    Class_t** implements;
-}ImplementsTable_t;
 
 typedef struct{
     struct list_head list; //Since this probably gonna be inside temporary arena, we might use a list
@@ -85,7 +64,35 @@ typedef struct{
 
 typedef struct{
     uint16_t name_id;
+    JavaFieldType_t type; //Still store type separately for faster opcodes on resolved fields
+    size_t offset; //offset is in uint32_t words!
+    //uint8_t size; //size is in uint32_t words!
+
+    struct{
+        union{
+            uint32_t flags;
+            struct{
+                unsigned is_static:1;
+            };
+        };
+    }flags;     
+
+    ClassSymbol_t* constantvalue; //If non NULL getstatic / putstatic must initialise field with that value then set to NULL! Will lead to ClassSymbol_t* 
+                         //So if constantpool entry was resolved, and this field wasnt initalised yet, we can use resolved value and vise-versa
+}Field_t;
+
+typedef struct{
+    size_t count;
+    Field_t* fields;
+}FieldTable_t;
+
+typedef struct{
+    uint16_t name_id;
     uint16_t vtable_index;
+    uint16_t interface_index;
+
+    Class_t* class;
+    
     struct{
         union{
             uint32_t flags;
@@ -93,13 +100,14 @@ typedef struct{
                 unsigned is_native:1;
                 unsigned is_static:1;
                 unsigned is_special:1;
-                unsigned is_virtual:1;
+                unsigned is_virtual:1; //!(is_static || is_special)
+                unsigned is_interface:1;
             };
         };
     }flags; 
 
-    size_t return_size;
-    size_t arguments_size;
+    size_t return_size; //In uint32_t words!
+    size_t arguments_size; //In uint32_t words!
 
     void* code;
 }Method_t;
@@ -138,6 +146,23 @@ typedef struct{
     struct list_head cp_patch_list;
 }ClassLinkTimeMetadata_t;
 
+typedef struct{
+    Class_t* interface;
+
+    size_t methods_count;
+    Method_t** methods;
+}Implementation_t;
+
+typedef struct{
+    size_t count;
+    Implementation_t* implementations;
+}ImplementsTable_t;
+
+typedef struct{
+    uint16_t interface_name_id; 
+    uint16_t itable_index;
+}ClassIMethodSymbol_t;
+
 typedef struct Class_t{
     //Linker info
     struct list_head list; //Required for link-time hierarchy building
@@ -154,8 +179,8 @@ typedef struct Class_t{
             uint32_t flags;
             struct{
                 unsigned is_linked:1;
+                unsigned is_array:1;
                 unsigned is_interface:1;
-
                 //TODO: other flags
             };
         };
@@ -166,8 +191,8 @@ typedef struct Class_t{
     FieldTable_t instance_fields;
     FieldTable_t static_fields;
 
-    size_t object_size; //Parent sizes + self size
-    uint8_t* static_fields_storage;
+    size_t object_size; //Parent sizes + self size. Size in uint32_t words
+    int32_t* static_fields_storage;
 
     //Method info
     //TODO: methods structure
@@ -181,12 +206,16 @@ typedef struct{
     Class_t* classes[1024];
 }ClassTable_t;
 
-void classes_init();
+void classes_init(); //Not to be called by user!
+
+unsigned class_field_sizeof(JavaFieldType_t type);
 
 Class_t* class_find(uint16_t name_id);
 Error_t class_insert(Class_t* klass);
 
-Method_t* class_find_virtual_method(Class_t* klass, uint16_t name_id);
+Error_t class_resolv_symbol(ClassSymbol_t* symbol);
 
 //ALARM: it does loading AND linking
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
+
+Method_t* class_find_method(Class_t* class, uint16_t name_id);

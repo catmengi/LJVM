@@ -10,13 +10,17 @@
 static char* system_prefixes[] = {"java/"};
 static BuiltinClassEntry_t* builtin_classes[] = {
     &java_lang_Object,
+    &dummy_class,
+    &i_class,
 };
 
-static char s_path[256] = {0};
+static char s_path[256 + sizeof(".class") + 1] = {0};
 static char s_app_classpath[256] = {0};
 static memstream_t s_memstream = {0};
 
 static bool is_system_class(char* class_name){
+    return true;
+
 
     for(unsigned i = 0; i < sizeof(system_prefixes) / sizeof(system_prefixes[0]); i++){
         if(strncmp(class_name, system_prefixes[i], strlen(system_prefixes[i])) == 0) return true;
@@ -40,6 +44,8 @@ static int init_classtream(char* class_name, ClassStream_t* classstream){
 
         return classstream_init_file(classstream, fopen(s_path, "rb"));
     }
+
+    return -1;
 }
 
 JRawClass_t* loader_load_class(char* name){

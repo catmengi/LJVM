@@ -15,12 +15,21 @@
 
 static bump_allocator_t s_permament_arena = {0}, s_temporary_arena = {0};
 static ClassTable_t s_class_table = {0};
+static bool s_initialised = false; //Reinit protection (VM reset in firmwares)
 
 #define JVM_CLASSPATH "java_src"
 
 void classes_init(){
-    assert(bumper_create(&s_permament_arena, CLASS_PERMAMENT_ARENA) == 0);
-    assert(bumper_create(&s_temporary_arena, CLASS_TEMPOPARY_ARENA) == 0);
+    
+    if(!s_initialised){
+        assert(bumper_create(&s_permament_arena, CLASS_PERMAMENT_ARENA) == 0);
+        assert(bumper_create(&s_temporary_arena, CLASS_TEMPOPARY_ARENA) == 0);
+        s_initialised = true;
+    } else {
+        memset(&s_class_table, 0, sizeof(s_class_table));
+        bumper_reset(&s_permament_arena);
+        bumper_reset(&s_temporary_arena);
+    }
 }
 
 static uint32_t hash(uint16_t name_id) {
@@ -97,14 +106,25 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     char* string_name = stringpool_get(name_id);
     if(string_name[0] == '['){
         Class_t* jlObject = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(name_id, &jlObject)) == JERR_OK, err, err, exit);
+        int jlname_id = stringpool_add("java/lang/Object");
+        FAIL_SET_JUMP(jlname_id >= 0, err, JERR_OOM, exit);
+
+        FAIL_SET_JUMP((err = class_load_bynameid(jlname_id, &jlObject)) == JERR_OK, err, err, exit);
 
         Class_t* array_class = bumper_calloc(&s_permament_arena, 1, sizeof(*array_class));
         FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
 
-        memcpy(array_class, jlObject, sizeof(*jlObject));
+        INIT_LIST_HEAD(&array_class->list);
         array_class->name_id = name_id;
+        array_class->parent = jlObject;
+        array_class->vtable = jlObject->vtable;
+        array_class->vtable_size = jlObject->vtable_size;
+        array_class->object_size = jlObject->object_size;
 
+        array_class->flags.is_linked = 1;
+        array_class->flags.is_array = 1;
+
+        *out = array_class;
         FAIL_SET_JUMP((err = class_insert(array_class)) == JERR_OK, err, err, exit);
     } else {
         FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(string_name), out)) == JERR_OK, err, err, exit);
@@ -115,8 +135,8 @@ exit:
     return err;
 }
 
-static unsigned class_field_sizeof(JavaFieldType_t type){
-    return type == TYPE_VOID ? 0 : type == TYPE_LONG || type == TYPE_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
+unsigned class_field_sizeof(JavaFieldType_t type){
+    return type == TYPE_VOID ? 0 : type == TYPE_LONG || type == TYPE_DOUBLE ? 2 : 1;
 }
 
 static int find_patched_symbol_index(unsigned cp_index, struct list_head* patch_list){
@@ -221,9 +241,6 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
                     case EJCT_METHODREF:
                         symbol->type = PROXY_SYMBOL_METHOD;
                         break;
-                    case EJCT_INTERFACE_METHODREF:
-                        symbol->type = PROXY_SYMBOL_IMETHOD;
-                        break;
                 }
                 symbol->value = proxy_FMIM;
             }
@@ -327,9 +344,95 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
     }
 }
 
+static Error_t parse_method_descriptor(const char* descriptor, size_t* return_size, size_t* arguments_size){
+    Error_t err = JERR_OK;
+    
+    FAIL_SET_JUMP(descriptor && return_size && arguments_size, err, JERR_BADPARAM, exit);
+    
+    // Descriptor format: (param_types)return_type
+    // Examples: ()V, (II)I, (Ljava/lang/String;)V, ([I)Z
+    
+    if(*descriptor != '('){
+        return JERR_BADPARAM;
+    }
+    descriptor++;
+    
+    *arguments_size = 0;
+    
+    // Parse argument types
+    while(*descriptor != ')' && *descriptor != '\0'){
+        JavaFieldType_t type;
+        
+        if(*descriptor == 'L'){
+            // Object type: Ljava/lang/String;
+            type = TYPE_HANDLE;
+            descriptor = strchr(descriptor, ';');
+            if(!descriptor) return JERR_BADPARAM;
+            descriptor++;
+        }
+        else if(*descriptor == '['){
+            // Array type: [I, [Ljava/lang/String;, etc
+            while(*descriptor == '[') descriptor++;
+            
+            if(*descriptor == 'L'){
+                type = TYPE_HANDLE;
+                descriptor = strchr(descriptor, ';');
+                if(!descriptor) return JERR_BADPARAM;
+                descriptor++;
+            }
+            else {
+                type = (JavaFieldType_t)*descriptor;
+                descriptor++;
+            }
+        }
+        else {
+            // Primitive type
+            type = (JavaFieldType_t)*descriptor;
+            descriptor++;
+        }
+        
+        *arguments_size += class_field_sizeof(type);
+    }
+    
+    if(*descriptor != ')'){
+        return JERR_BADPARAM;
+    }
+    descriptor++;
+    
+    // Parse return type
+    if(*descriptor == '\0'){
+        return JERR_BADPARAM;
+    }
+    
+    JavaFieldType_t return_type;
+    
+    if(*descriptor == 'L'){
+        // Object return type
+        return_type = TYPE_HANDLE;
+    }
+    else if(*descriptor == '['){
+        // Array return type
+        return_type = TYPE_HANDLE;  // Arrays are references
+    }
+    else if(*descriptor == 'V'){
+        // Void return type
+        return_type = TYPE_VOID;
+    }
+    else {
+        // Primitive return type
+        return_type = (JavaFieldType_t)*descriptor;
+    }
+    
+    *return_size = class_field_sizeof(return_type);
+    
+exit:
+    return err;
+}
+
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     Error_t err = JERR_OK;
-    FAIL_SET_JUMP(parsed_class && out, err, JERR_BADPARAM, exit);
+    FAIL_SET_JUMP(parsed_class, err, JERR_NOCLASSDEF, exit);
+    FAIL_SET_JUMP(out, err, JERR_BADPARAM, exit);
 
     JConstantPool_t* constantpool = &parsed_class->constantpool;
     //Base initialisation
@@ -350,6 +453,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     Class_t* this_class = bumper_calloc(&s_permament_arena, 1, sizeof(*this_class));
     FAIL_SET_JUMP(this_class, err, JERR_OOM, exit);
+
+    this_class->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
 
     ClassLinkTimeMetadata_t* metadata = bumper_calloc(&s_temporary_arena, 1, sizeof(*metadata));
     FAIL_SET_JUMP(metadata, err, JERR_OOM, exit);
@@ -375,8 +480,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
     this_class->implements.count = metadata->implements_count;
-    this_class->implements.implements = bumper_calloc(&s_permament_arena, this_class->implements.count, sizeof(*this_class->implements.implements));
-    FAIL_SET_JUMP(this_class->implements.implements, err, JERR_OOM, exit);
+    this_class->implements.implementations = bumper_calloc(&s_permament_arena, this_class->implements.count, sizeof(*this_class->implements.implementations));
+    FAIL_SET_JUMP(this_class->implements.implementations, err, JERR_OOM, exit);
 
     //Constantpool / symtab init
     INIT_LIST_HEAD(&metadata->cp_patch_list);
@@ -412,8 +517,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
         field->type = raw_field_descriptor_utf8->string[0];
         field->offset = offsets[is_static];
-        field->size = class_field_sizeof(field->type);
-        offsets[is_static] += field->size;
+        field->flags.is_static = is_static;
+        offsets[is_static] += class_field_sizeof(field->type);
         
         int name_id = stringpool_add((char*)raw_field_name_utf8->string);
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
@@ -432,7 +537,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
             }
         }
     }
-    this_class->static_fields_storage = bumper_calloc(&s_permament_arena, 1, offsets[1]);
+    this_class->static_fields_storage = bumper_calloc(&s_permament_arena, offsets[1], sizeof(int32_t));
     FAIL_SET_JUMP(this_class->static_fields_storage, err, JERR_OOM, exit);
 
     this_class->object_size = offsets[0]; //Will will use this also on linker stage to calculate proper offsets
@@ -449,10 +554,14 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         Method_t* method = &this_class->methods.methods[i];
 
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
+        method->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
+
         method->flags.is_static = is_static;
         method->flags.is_virtual = !(is_static || is_special);
         method->flags.is_special = is_special;
         
+        method->class = this_class;
+
         JConstant_t* raw_method_descriptor = parser_constantpool_get(constantpool, raw_method->descriptor_index);
         JConstant_t* raw_method_name = parser_constantpool_get(constantpool, raw_method->name_index);
         
@@ -472,8 +581,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
 
         method->name_id = name_id;
-        method->return_size = class_field_sizeof(raw_method_descriptor_cstr[0]);
-        method->arguments_size = 0; //TODO
+        method->arguments_size += method->flags.is_virtual;
+        
+        FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr, &method->return_size, &method->arguments_size)) == JERR_OK, err, err, exit);
         
         if(method->flags.is_native){
             FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
@@ -522,7 +632,7 @@ exit:
     return err;
 }
 
-Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id){
+static Method_t* class_find_vtable_method(Class_t* class, uint16_t name_id){
     for(unsigned i = 0; i < class->vtable_size; i++){
         Method_t* method = class->vtable[i];
         if(method->name_id == name_id)
@@ -532,7 +642,53 @@ Method_t* class_find_virtual_method(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
-Error_t class_resolv_symbol(ClassSymbol_t* symbol){
+Method_t* class_find_method(Class_t* class, uint16_t name_id){
+    for(unsigned i = 0; i < class->methods.count; i++){
+        Method_t* method = &class->methods.methods[i];
+        if(method->name_id == name_id)
+            return method;
+    }
+
+    return NULL;
+}
+
+
+//Hack but should work well with class_fix_hierarchy interface resolution logic
+static Error_t class_find_imethod(Class_t* class, uint16_t name_id, uint16_t* index_out){
+    unsigned vindex = 0;
+    for(unsigned i = 0; i < class->methods.count; i++){
+        Method_t* method = &class->methods.methods[i];
+        if(method->flags.is_virtual){
+            vindex++;
+            if(method->name_id == name_id){
+                *index_out = vindex;
+                return JERR_OK;
+            }
+        }
+    }
+
+    return JERR_NOTFOUND;
+}
+
+static Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
+    for(unsigned i = 0; i < class->static_fields.count; i++){
+        Field_t* field = &class->static_fields.fields[i];
+        if(field->name_id == name_id)
+            return field;
+    }
+    return NULL;
+}
+
+static Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
+    for(unsigned i = 0; i < class->instance_fields.count; i++){
+        Field_t* field = &class->instance_fields.fields[i];
+        if(field->name_id == name_id)
+            return field;
+    }
+    return NULL;
+}
+
+inline Error_t class_resolv_symbol(ClassSymbol_t* symbol){
     Error_t err = JERR_OK;
 
     if(symbol->type < PROXY_SYMBOL_CLASS) return JERR_OK;
@@ -550,13 +706,37 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
         break;
 
         case PROXY_SYMBOL_FIELD:{
-
+            symbol->type = SYMBOL_FIELD;
+            symbol->value = (symbol->value = class_find_static_field(origin, proxy_symbol->self_name_id)) ? 
+                            symbol->value : class_find_instance_field(origin, proxy_symbol->self_name_id);
+            FAIL_SET_JUMP(symbol->value, err, JERR_NOTFOUND, exit);
         }
         break;
+
+        case PROXY_SYMBOL_METHOD:{
+            symbol->type = SYMBOL_METHOD;
+            FAIL_SET_JUMP((symbol->value = class_find_method(origin, proxy_symbol->self_name_id)), err, JERR_NOTFOUND, exit);
+        }
+        break;
+
+        case PROXY_SYMBOL_STRING:{
+            assert(0 && "TODO: string support!");
+        }
+        break;
+
+        default: break;
     }
 
 exit:
     return err;
+}
+
+static unsigned count_instance_methods(Class_t* class){
+    unsigned count = 0;
+    for(unsigned i = 0; i < class->methods.count; i++){
+        count += class->methods.methods[i].flags.is_virtual ? 1 : 0;
+    }
+    return count;
 }
 
 static Error_t class_fix_hierarchy(Class_t* this_class){
@@ -573,39 +753,58 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     }
 
     //Generate vtable
-    this_class->vtable_size = parent ? parent->vtable_size : 0;
-    for(unsigned i = 0; i < this_class->methods.count; i++){
-        Method_t* method = &this_class->methods.methods[i];
-        if(method->flags.is_virtual){
-            this_class->vtable_size += parent ? class_find_virtual_method(parent, method->name_id) == NULL : 1;
-        }
-    }
-
-    this_class->vtable = bumper_calloc(&s_permament_arena, this_class->vtable_size, sizeof(*this_class->vtable));
-    FAIL_SET_JUMP(this_class->vtable, err, JERR_OOM, exit);
-
-    unsigned vtable_index = parent ? parent->vtable_size : 0;
-    if(parent) memcpy(this_class->vtable, parent->vtable, sizeof(*this_class->vtable) * vtable_index);
-
-    for(unsigned i = 0; i < this_class->methods.count; i++){
-        Method_t* method = &this_class->methods.methods[i];
-        if(method->flags.is_virtual){
-            Method_t* overriden = parent ? class_find_virtual_method(parent, method->name_id) : NULL;
-            if(overriden){
-                method->vtable_index = overriden->vtable_index;
-                this_class->vtable[method->vtable_index] = method;
-            } else {
-                method->vtable_index = vtable_index++;
-                this_class->vtable[method->vtable_index] = method;
+    if(!this_class->flags.is_interface){
+        this_class->vtable_size = parent ? parent->vtable_size : 0;
+        for(unsigned i = 0; i < this_class->methods.count; i++){
+            Method_t* method = &this_class->methods.methods[i];
+            if(method->flags.is_virtual){
+                this_class->vtable_size += parent ? class_find_vtable_method(parent, method->name_id) == NULL : 1;
             }
         }
-    }
+
+        this_class->vtable = bumper_calloc(&s_permament_arena, this_class->vtable_size, sizeof(*this_class->vtable));
+        FAIL_SET_JUMP(this_class->vtable, err, JERR_OOM, exit);
+
+        unsigned vtable_index = parent ? parent->vtable_size : 0;
+        if(parent) memcpy(this_class->vtable, parent->vtable, sizeof(*this_class->vtable) * vtable_index);
+
+        for(unsigned i = 0; i < this_class->methods.count; i++){
+            Method_t* method = &this_class->methods.methods[i];
+            if(method->flags.is_virtual){
+                Method_t* overriden = parent ? class_find_vtable_method(parent, method->name_id) : NULL;
+                if(overriden){
+                    method->vtable_index = overriden->vtable_index;
+                    this_class->vtable[method->vtable_index] = method;
+                } else {
+                    method->vtable_index = vtable_index++;
+                    this_class->vtable[method->vtable_index] = method;
+                }
+            }
+        }
+    } else this_class->vtable_size = 0;
+
     this_class->flags.is_linked = 1;
 
 
     //Finally fix interfaces
     for(unsigned i = 0; i < this_class->implements.count; i++){
-        FAIL_SET_JUMP((err = class_load_bynameid(metadata->implements[i], &this_class->implements.implements[i])) == JERR_OK, err, err, exit);
+        Implementation_t* implementation = &this_class->implements.implementations[i];
+        FAIL_SET_JUMP((err = class_load_bynameid(metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
+        Class_t* interface = implementation->interface;
+
+        FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
+
+        implementation->methods_count = count_instance_methods(interface);
+        FAIL_SET_JUMP((implementation->methods = bumper_calloc(&s_permament_arena, implementation->methods_count, sizeof(*implementation->methods))), err, JERR_OOM, exit);
+
+        unsigned iindex = 0;
+        for(unsigned j = 0; j < interface->methods.count; j++){
+            Method_t* imethod = &interface->methods.methods[j];
+            if(imethod->flags.is_virtual){
+                FAIL_SET_JUMP((implementation->methods[iindex++] = class_find_vtable_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
+                imethod->interface_index = iindex;
+            }
+        }
     }
 
     this_class->metadata = NULL;

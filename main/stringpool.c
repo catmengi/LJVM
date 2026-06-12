@@ -5,9 +5,11 @@
 
 #include <string.h>
 #include <assert.h>
+#include <stdbool.h>
 
 static bump_allocator_t s_arena = {0};
-static char** strings = NULL;
+static char** s_strings = NULL;
+static bool s_initialised = false;
 
 static uint32_t djb2_hash(char *str) {
         uint32_t hash = 5381;
@@ -18,8 +20,14 @@ static uint32_t djb2_hash(char *str) {
 }
 
 void stringpool_init(){
-    assert(bumper_create(&s_arena, STRINGPOOL_ARENA) == 0);
-    assert((strings = bumper_calloc(&s_arena, STRINGPOOL_SIZE, sizeof(*strings))));
+    if(!s_initialised){
+        assert(bumper_create(&s_arena, STRINGPOOL_ARENA) == 0);
+        assert((s_strings = bumper_calloc(&s_arena, STRINGPOOL_SIZE, sizeof(*s_strings))));
+        s_initialised = true;
+    } else {
+        memset(s_strings, 0, STRINGPOOL_SIZE * sizeof(*s_strings));
+        bumper_reset(&s_arena);   
+    }
 }
 
 typedef struct{
@@ -41,12 +49,12 @@ static SPoolCalculatedIndex_t calculate_index(char* string){
 
     for(uint32_t i = 0; i < STRINGPOOL_SIZE; i++){
         uint32_t current_idx = (start_pos + i) % STRINGPOOL_SIZE;
-        if(strings[current_idx] == NULL){
+        if(s_strings[current_idx] == NULL){
             retval.index = current_idx;
             retval.flags.is_found = 0;
             retval.flags.is_error = 0;
             goto exit;
-        } else if(strcmp(string, strings[current_idx]) == 0){
+        } else if(strcmp(string, s_strings[current_idx]) == 0){
             retval.index = current_idx;
             retval.flags.is_found = 1;
             retval.flags.is_error = 0;
@@ -68,7 +76,7 @@ int stringpool_add(char* string){
 
     char* string_copy = bumper_strdup(&s_arena, string);
     if(string_copy){
-        strings[index.index] = string_copy;
+        s_strings[index.index] = string_copy;
         return index.index; 
     } else return -1;
 }
@@ -77,6 +85,6 @@ char* stringpool_get(int index){
     if(index < 0 || index >= STRINGPOOL_SIZE)
         return NULL;
 
-    return strings[index];
+    return s_strings[index];
 }
 
