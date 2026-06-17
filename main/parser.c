@@ -162,6 +162,7 @@ typedef struct{
 }AttributeInfoParserDesc_t;
 
 static Error_t parse_attributes(struct list_head* output_list,JRawClass_t* current_class, ClassStream_t* stream);
+
 static void* code_parse(JRawClass_t* current_class, ClassStream_t* stream){
     JCodeAttribute_t* code = bumper_calloc(&s_parser_arena,1,sizeof(*code));
     if(!code) return NULL;
@@ -206,10 +207,52 @@ static void* constantvalue_parse(JRawClass_t* current_class, ClassStream_t* stre
     return constant_index;
 }
 
+static int stackmapframeverifierinfo_parse(JStackMapVerifierInfo_t* info, ClassStream_t* stream){
+    if(classstream_readU8(stream, &info->type) != 0) return 1;
+
+    if(info->type > VERIFIER_ITEM_UNITIALIZED) return 1;
+    if(info->type == VERIFIER_ITEM_OBJECT || info->type == VERIFIER_ITEM_UNITIALIZED)
+        if(classstream_readU16(stream, &info->ctx) != 0) return 1;
+
+    return 0;
+}
+
+static int stackmapframe_parse(JStackMapFrame_t* frame, ClassStream_t* stream){
+    if(classstream_readU16(stream, &frame->pc_pos) != 0) return 1;
+
+    if(classstream_readU16(stream, &frame->locals_count) != 0) return 1;
+    if(!(frame->locals = bumper_calloc(&s_parser_arena, frame->locals_count, sizeof(*frame->locals)))) return 1;
+    for(unsigned i = 0; i < frame->locals_count; i++){
+        if(stackmapframeverifierinfo_parse(&frame->locals[i], stream)) return 1;
+    }
+
+    if(classstream_readU16(stream, &frame->stack_size) != 0) return 1;
+    if(!(frame->stack = bumper_calloc(&s_parser_arena, frame->stack_size, sizeof(*frame->stack)))) return 1;
+    for(unsigned i = 0; i < frame->stack_size; i++){
+        if(stackmapframeverifierinfo_parse(&frame->stack[i], stream)) return 1;
+    }
+
+    return 0;
+}
+
+static void* stackmap_parse(JRawClass_t* class, ClassStream_t* stream){
+    JStackMap_t* stackmap = bumper_calloc(&s_parser_arena, 1, sizeof(*stackmap));
+    if(!stackmap) return NULL;
+
+    if(classstream_readU16(stream, &stackmap->entries_count) != 0) return NULL;
+    if(!(stackmap->entries = bumper_calloc(&s_parser_arena, stackmap->entries_count, sizeof(*stackmap->entries)))) return NULL;
+
+    for(unsigned i = 0; i < stackmap->entries_count; i++){
+        if(stackmapframe_parse(&stackmap->entries[i], stream) != 0) return NULL;
+    }
+
+    return stackmap;
+}
+
 static AttributeInfoParserDesc_t attribute_parsers[] = {
     {"Code",EJAT_CODE,code_parse},
     {"ConstantValue",EJAT_CONSTANTVALUE,constantvalue_parse},
-    //TODO: StackMap from cldc
+    {"StackMap", EJAT_STACKMAP, stackmap_parse}
 };
 
 static Error_t parse_attributes(struct list_head* output_list,JRawClass_t* current_class, ClassStream_t* stream){

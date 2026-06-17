@@ -27,7 +27,39 @@ typedef enum{
 typedef enum{
     EJAT_CODE, //"Code" JRawCodeAttribute_t
     EJAT_CONSTANTVALUE, //"ConstantValue" uint16_t*
+    EJAT_STACKMAP, //"StackMap"
 }JRawAttributeType_t;
+
+typedef enum{
+    VERIFIER_ITEM_TOP = 0,
+    VERIFIER_ITEM_INT,
+    VERIFIER_ITEM_FLOAT,
+    VERIFIER_ITEM_DOUBLE,
+    VERIFIER_ITEM_LONG,
+    VERIFIER_ITEM_NULL,
+    VERIFIER_ITEM_UNITIALIZED_THIS,
+    VERIFIER_ITEM_OBJECT, //uint16_t cp_index;
+    VERIFIER_ITEM_UNITIALIZED,
+}JStackMapVerifierType_t;
+
+typedef struct{
+    uint8_t type;
+    uint16_t ctx;
+}JStackMapVerifierInfo_t;
+
+typedef struct{
+    uint16_t pc_pos;
+    uint16_t locals_count;
+    uint16_t stack_size;
+
+    JStackMapVerifierInfo_t* locals;
+    JStackMapVerifierInfo_t* stack;
+}JStackMapFrame_t;
+
+typedef struct{
+    uint16_t entries_count;
+    JStackMapFrame_t* entries;
+}JStackMap_t;
 
 typedef struct{
     uint16_t class_index;

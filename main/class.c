@@ -8,6 +8,7 @@
 #include "bumper.h"
 #include "stringpool.h"
 #include "native_methods_service.h"
+#include "thread.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -135,7 +136,7 @@ exit:
     return err;
 }
 
-unsigned class_field_sizeof(JavaFieldType_t type){
+unsigned class_field_sizeof(JavaValueType_t type){
     return type == TYPE_VOID ? 0 : type == TYPE_LONG || type == TYPE_DOUBLE ? 2 : 1;
 }
 
@@ -344,10 +345,10 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
     }
 }
 
-static Error_t parse_method_descriptor(const char* descriptor, size_t* return_size, size_t* arguments_size){
+static Error_t parse_method_descriptor(const char* descriptor, JavaValueType_t* arguments_size, JavaValueType_t* return_type){
     Error_t err = JERR_OK;
     
-    FAIL_SET_JUMP(descriptor && return_size && arguments_size, err, JERR_BADPARAM, exit);
+    FAIL_SET_JUMP(descriptor && return_type && arguments_size, err, JERR_BADPARAM, exit);
     
     // Descriptor format: (param_types)return_type
     // Examples: ()V, (II)I, (Ljava/lang/String;)V, ([I)Z
@@ -361,11 +362,11 @@ static Error_t parse_method_descriptor(const char* descriptor, size_t* return_si
     
     // Parse argument types
     while(*descriptor != ')' && *descriptor != '\0'){
-        JavaFieldType_t type;
+        JavaValueType_t type;
         
         if(*descriptor == 'L'){
             // Object type: Ljava/lang/String;
-            type = TYPE_HANDLE;
+            type = TYPE_REFERENCE;
             descriptor = strchr(descriptor, ';');
             if(!descriptor) return JERR_BADPARAM;
             descriptor++;
@@ -375,19 +376,19 @@ static Error_t parse_method_descriptor(const char* descriptor, size_t* return_si
             while(*descriptor == '[') descriptor++;
             
             if(*descriptor == 'L'){
-                type = TYPE_HANDLE;
+                type = TYPE_REFERENCE;
                 descriptor = strchr(descriptor, ';');
                 if(!descriptor) return JERR_BADPARAM;
                 descriptor++;
             }
             else {
-                type = (JavaFieldType_t)*descriptor;
+                type = (JavaValueType_t)*descriptor;
                 descriptor++;
             }
         }
         else {
             // Primitive type
-            type = (JavaFieldType_t)*descriptor;
+            type = (JavaValueType_t)*descriptor;
             descriptor++;
         }
         
@@ -404,26 +405,84 @@ static Error_t parse_method_descriptor(const char* descriptor, size_t* return_si
         return JERR_BADPARAM;
     }
     
-    JavaFieldType_t return_type;
-    
     if(*descriptor == 'L'){
         // Object return type
-        return_type = TYPE_HANDLE;
+        *return_type = TYPE_REFERENCE;
     }
     else if(*descriptor == '['){
         // Array return type
-        return_type = TYPE_HANDLE;  // Arrays are references
+        *return_type = TYPE_REFERENCE;  // Arrays are references
     }
     else if(*descriptor == 'V'){
         // Void return type
-        return_type = TYPE_VOID;
+        *return_type = TYPE_VOID;
     }
     else {
         // Primitive return type
-        return_type = (JavaFieldType_t)*descriptor;
+        *return_type = (JavaValueType_t)*descriptor;
     }
     
-    *return_size = class_field_sizeof(return_type);
+    
+exit:
+    return err;
+}
+
+static Error_t generate_method_locals_bitmap(const char* descriptor, bool is_virtual, uint32_t* bitmap){
+    Error_t err = JERR_OK;
+    
+    FAIL_SET_JUMP(descriptor, err, JERR_BADPARAM, exit);
+    
+    // Descriptor format: (param_types)return_type
+    // Examples: ()V, (II)I, (Ljava/lang/String;)V, ([I)Z
+    
+    if(*descriptor != '('){
+        return JERR_BADPARAM;
+    }
+    descriptor++;
+    
+    if(is_virtual)
+        SHADOW_SET_REF(bitmap, 0);
+    unsigned index = is_virtual;
+
+    // Parse argument types
+    while(*descriptor != ')' && *descriptor != '\0'){
+        JavaValueType_t type;
+        
+        if(*descriptor == 'L'){
+            // Object type: Ljava/lang/String;
+            SHADOW_SET_REF(bitmap, index++);
+            descriptor = strchr(descriptor, ';');
+            if(!descriptor) return JERR_BADPARAM;
+            descriptor++;
+        }
+        else if(*descriptor == '['){
+            // Array type: [I, [Ljava/lang/String;, etc
+            SHADOW_SET_REF(bitmap, index++);
+            while(*descriptor == '[') descriptor++;
+            
+            if(*descriptor == 'L'){
+                descriptor = strchr(descriptor, ';');
+                if(!descriptor) return JERR_BADPARAM;
+                descriptor++;
+            }
+            else {
+                descriptor++;
+            }
+        }
+        else {
+            // Primitive type
+            if(*descriptor == TYPE_LONG || *descriptor == TYPE_DOUBLE)
+                index += 2;
+            else index++;
+
+            descriptor++;
+        }
+        
+    }
+    
+    if(*descriptor != ')'){
+        return JERR_BADPARAM;
+    }
     
 exit:
     return err;
@@ -515,12 +574,20 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         JRawUTF8_t* raw_field_descriptor_utf8 = raw_field_descriptor->value;
         JRawUTF8_t* raw_field_name_utf8 = raw_field_name->value;
 
+        char* raw_field_descriptor_cstr = (char*)raw_field_descriptor_utf8->string;
+        char* raw_field_name_cstr = (char*)raw_field_name_utf8->string;
+
+        size_t mangled_len = strlen(raw_field_descriptor_cstr) + strlen(raw_field_name_cstr) + 2;
+        char* mangled_name = bumper_calloc(&s_temporary_arena, 1, mangled_len);
+        FAIL_SET_JUMP(mangled_name, err, JERR_OOM, exit);
+        snprintf(mangled_name, mangled_len, "%s@%s", raw_field_name_cstr, raw_field_descriptor_cstr);
+
         field->type = raw_field_descriptor_utf8->string[0];
         field->offset = offsets[is_static];
         field->flags.is_static = is_static;
         offsets[is_static] += class_field_sizeof(field->type);
-        
-        int name_id = stringpool_add((char*)raw_field_name_utf8->string);
+
+        int name_id = stringpool_add(mangled_name);
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
 
         field->name_id = name_id;
@@ -581,10 +648,13 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
 
         method->name_id = name_id;
-        method->arguments_size += method->flags.is_virtual;
         
-        FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr, &method->return_size, &method->arguments_size)) == JERR_OK, err, err, exit);
-        
+        FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type)) == JERR_OK, err, err, exit);
+        method->args_slots += method->flags.is_virtual;
+        method->args_bitmap_size = (method->args_slots + 31) / 32; //32 bits in uint32_t.......
+        FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(&s_permament_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
+        FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, method->flags.is_virtual, method->args_bitmap)) == JERR_OK, err, err, exit); 
+
         if(method->flags.is_native){
             FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
         } else {
@@ -594,6 +664,40 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
                     JCodeAttribute_t* code = attribute->info;
                     MethodBytecode_t* bytecode = bumper_calloc(&s_permament_arena, 1, sizeof(*bytecode));
                     FAIL_SET_JUMP(bytecode, err, JERR_OOM, exit);
+                    FAIL_SET_JUMP((bytecode->verifier_info = bumper_calloc(&s_permament_arena, 1, sizeof(*bytecode->verifier_info))), err, JERR_OOM, exit);
+
+                    JRawAttribute_t* inside_attribute = NULL;
+                    list_for_each_entry(inside_attribute, &code->attributes, list){
+                        if(inside_attribute->type == EJAT_STACKMAP){
+                            JStackMap_t* stackmap = inside_attribute->info;
+
+                            bytecode->verifier_info->frame_count = stackmap->entries_count;
+                            FAIL_SET_JUMP((bytecode->verifier_info->frames = bumper_calloc(&s_permament_arena, bytecode->verifier_info->frame_count, sizeof(*bytecode->verifier_info->frames))), err, JERR_OOM, exit);
+
+                            for(unsigned i = 0; i < bytecode->verifier_info->frame_count; i++){
+                                JStackMapFrame_t* frame_original = &stackmap->entries[i];
+                                BytecodeVerifierFrame_t* frame = &bytecode->verifier_info->frames[i];
+
+                                frame->locals_count = frame_original->locals_count;
+                                frame->stack_size = frame->stack_size;
+                                
+                                FAIL_SET_JUMP((frame->locals = bumper_calloc(&s_permament_arena, frame->locals_count, sizeof(*frame->locals))), err, JERR_OOM, exit);
+                                FAIL_SET_JUMP((frame->stack = bumper_calloc(&s_permament_arena, frame->stack_size, sizeof(*frame->stack))), err, JERR_OOM, exit);
+
+                                for(unsigned j = 0; j < frame->locals_count; j++){
+                                    frame->locals[j].ctx = frame_original->locals[j].ctx;
+                                    frame->locals[j].type = frame_original->locals[j].type;
+                                }
+
+                                for(unsigned j = 0; j < frame->stack_size; j++){
+                                    frame->stack[j].ctx = frame_original->stack[j].ctx;
+                                    frame->stack[j].type = frame_original->stack[j].type;
+                                }
+                            }
+
+                            break;
+                        }
+                    }
 
                     bytecode->max_locals = code->max_locals;
                     bytecode->max_stack = code->max_stack;

@@ -17,8 +17,8 @@ typedef enum{
     TYPE_SHORT = 'S',
     TYPE_BOOL = 'Z',
     TYPE_VOID = 'V',
-    TYPE_HANDLE = 'L',
-}JavaFieldType_t;
+    TYPE_REFERENCE = 'L',
+}JavaValueType_t;
 
 typedef enum{
     SYMBOL_NONE,
@@ -64,7 +64,7 @@ typedef struct{
 
 typedef struct{
     uint16_t name_id;
-    JavaFieldType_t type; //Still store type separately for faster opcodes on resolved fields
+    JavaValueType_t type; //Still store type separately for faster opcodes on resolved fields
     size_t offset; //offset is in uint32_t words!
     //uint8_t size; //size is in uint32_t words!
 
@@ -80,11 +80,6 @@ typedef struct{
     ClassSymbol_t* constantvalue; //If non NULL getstatic / putstatic must initialise field with that value then set to NULL! Will lead to ClassSymbol_t* 
                          //So if constantpool entry was resolved, and this field wasnt initalised yet, we can use resolved value and vise-versa
 }Field_t;
-
-typedef struct{
-    size_t count;
-    Field_t* fields;
-}FieldTable_t;
 
 typedef struct{
     uint16_t name_id;
@@ -106,8 +101,11 @@ typedef struct{
         };
     }flags; 
 
-    size_t return_size; //In uint32_t words!
-    size_t arguments_size; //In uint32_t words!
+    JavaValueType_t return_type;
+
+    unsigned args_slots; //SP offset
+    unsigned args_bitmap_size; //GC bitmap
+    uint32_t* args_bitmap;
 
     void* code;
 }Method_t;
@@ -121,6 +119,30 @@ typedef struct{
 }MethodExceptionHandler_t;
 
 typedef struct{
+    size_t count;
+    Field_t* fields;
+}FieldTable_t;
+
+typedef struct{
+    uint8_t type;
+    uint16_t ctx; //addition info for some types
+}BytecodeVerifierVariable_t;
+
+typedef struct{
+    uint16_t pc;
+    uint16_t locals_count;
+    uint16_t stack_size;
+
+    BytecodeVerifierVariable_t* locals;
+    BytecodeVerifierVariable_t* stack;
+}BytecodeVerifierFrame_t;
+
+typedef struct{
+    uint16_t frame_count;
+    BytecodeVerifierFrame_t* frames;
+}BytecodeVerifierInfo_t;
+
+typedef struct{
     uint16_t max_stack;
     uint16_t max_locals;
 
@@ -129,6 +151,7 @@ typedef struct{
 
     size_t exception_count;
     MethodExceptionHandler_t* exceptions;
+    BytecodeVerifierInfo_t* verifier_info;
 }MethodBytecode_t;
 
 typedef struct{
@@ -208,7 +231,7 @@ typedef struct{
 
 void classes_init(); //Not to be called by user!
 
-unsigned class_field_sizeof(JavaFieldType_t type);
+unsigned class_field_sizeof(JavaValueType_t type);
 
 Class_t* class_find(uint16_t name_id);
 Error_t class_insert(Class_t* klass);

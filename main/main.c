@@ -23,8 +23,13 @@ int app_main(){
 
     java_method_invoke(method,  (int32_t[1]){0}, NULL);
 
-    thread_start(thread_alloc(),method, (int32_t[1]){0});
-    thread_schedule();
+    int32_t debug_value = 0;
+    //java_method_invoke(class_find_method(out, stringpool_add("debug_native@(I)I")),(int32_t[1]){1000}, &debug_value);
+
+    //assert(debug_value == 1488);
+
+    //thread_start(thread_alloc(),NULL, method);
+    //thread_schedule();
 
     return 0;
 }

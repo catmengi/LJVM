@@ -3,16 +3,26 @@
 #include "bumper.h"
 #include "class.h"
 #include "config.h"
+#include "object.h"
 
 #include <stdint.h>
+
+#define SHADOW_CLEAR_REF(bitmap, idx)  ((bitmap)[(idx) >> 5] &= ~(1U << ((idx) & 31)))
+#define SHADOW_SET_REF(bitmap, idx)    ((bitmap)[(idx) >> 5] |= (1U << ((idx) & 31)))
+#define SHADOW_GET_REF(bitmap, idx)    (((bitmap)[(idx) >> 5] & (1U << ((idx) & 31))) ? 1 : 0)
 
 typedef struct CallFrame_t CallFrame_t;
 typedef struct CallFrame_t{
     size_t frame_size; //Used because of arena
 
     uint8_t* pc;
+
+    uint32_t sp;
     int32_t* stack;
+    uint32_t* shadow_stack;
+
     int32_t* locals;
+    uint32_t* shadow_locals;
 
     Method_t* method;
     CallFrame_t* prev;
@@ -41,7 +51,7 @@ void threads_init();
 Error_t thread_schedule();
 
 Thread_t* thread_alloc();
-void thread_start(Thread_t* thread, Method_t* method, int32_t* args);
+void thread_start(Thread_t* thread, Object_t* this, Method_t* method);
 void thread_kill(Thread_t* thread);
 
 Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_value);

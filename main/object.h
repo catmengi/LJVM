@@ -3,11 +3,20 @@
 #include <stdint.h>
 #include "class.h"
 
+typedef struct{
+    uint32_t forward_ptr;
+    Class_t* class;
+}Object_t;
 
 typedef struct{
-    size_t size; //Data + Object_t header
-    Class_t* class;
+    size_t count;
+    JavaValueType_t type;
 
-    bool type; //0 - object, 1 - array
-    void* data; //int32_t* for objects, Array_t* for array
-}Object_t;
+    void* array;
+}ArrayObject_t;
+
+//Object_t header
+//==================
+//(int32_t fields[class->fields_count[1]] || ArrayObject_t header)
+//==========================================
+//int(32/64)_t element[array->count];

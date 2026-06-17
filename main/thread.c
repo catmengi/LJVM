@@ -60,14 +60,12 @@ Thread_t* thread_alloc(){
     return inactive;
 }
 
-void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
+void thread_start(Thread_t* thread, Object_t* this, Method_t* method){
     thread->state = THREAD_ACTIVE;
     thread->opcode_quota = THREAD_LOWEST_QUOTA * THREAD_DEFAULT_PRIORITY;
     
     CallFrame_t* base_frame = thread_frame_push(thread, method);
-    assert(base_frame);
-
-    memcpy(base_frame->locals, args, method->arguments_size * sizeof(int32_t));
+    assert(base_frame && method->args_slots == 1 && method->flags.is_virtual);
 
     list_del_init(&thread->list);
     list_add(&thread->list, &s_active_threads);
@@ -94,7 +92,7 @@ CallFrame_t* thread_frame_push(Thread_t* thread, Method_t* method){
     assert(!method->flags.is_native);
     
     MethodBytecode_t* bytecode = method->code;
-    size_t frame_size = (bytecode->max_locals * sizeof(int32_t)) + (bytecode->max_stack * sizeof(int32_t)) + sizeof(CallFrame_t);
+    size_t frame_size = (bytecode->max_locals * sizeof(int32_t)) + (bytecode->max_stack * sizeof(int32_t)) + sizeof(CallFrame_t) + (((bytecode->max_stack + 31) / 32) * sizeof(int32_t)) + (((bytecode->max_locals + 31) / 32) * sizeof(int32_t));
 
     char* frame_memory = bumper_calloc(&thread->frame_allocator, 1, frame_size);
     if(frame_memory){
@@ -102,6 +100,9 @@ CallFrame_t* thread_frame_push(Thread_t* thread, Method_t* method){
         frame->frame_size = frame_size;
         frame->locals = (void*)(frame_memory + sizeof(CallFrame_t));
         frame->stack = (void*)(frame_memory + (bytecode->max_locals * sizeof(int32_t)) + sizeof(CallFrame_t));
+        frame->shadow_locals = (void*)(frame_memory + (bytecode->max_locals * sizeof(int32_t)) + (bytecode->max_stack * sizeof(int32_t)) + sizeof(CallFrame_t));
+        frame->shadow_stack = (void*)(frame_memory + (bytecode->max_locals * sizeof(int32_t)) + (bytecode->max_stack * sizeof(int32_t)) + (((bytecode->max_locals + 31) / 32) * sizeof(int32_t)) + sizeof(CallFrame_t));
+
         frame->pc = bytecode->code;
         frame->method = method;
 
@@ -154,6 +155,8 @@ Error_t thread_schedule(){
                 case THREAD_ACTIVE:{
                     err = interpret_bytecode(thread);
                     FAIL_SET_JUMP(err == JERR_OK || err == JERR_SCHEDULE, err, err, exit);
+
+                    if(err != JERR_SCHEDULE) thread_kill(thread);
                 }
                 break;
 
@@ -171,25 +174,206 @@ exit:
     return err;
 }
 
+// 32-bit stack operations
+#define STACK_PUSH_INT(frame, value) ({ \
+    (frame)->stack[(frame)->sp] = (value); \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->sp++; \
+})
+
+#define STACK_PUSH_FLOAT(frame, value) ({ \
+    union { float f; int32_t i; } _u = { .f = (value) }; \
+    (frame)->stack[(frame)->sp] = _u.i; \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->sp++; \
+})
+
+#define STACK_PUSH_REF(frame, value) ({ \
+    (frame)->stack[(frame)->sp] = (int32_t)(uintptr_t)(value); \
+    SHADOW_SET_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->sp++; \
+})
+
+#define STACK_POP_INT(frame) ({ \
+    if ((frame)->sp == 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (frame)->sp--; \
+    if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->stack[(frame)->sp]; \
+})
+
+#define STACK_POP_FLOAT(frame) ({ \
+    if ((frame)->sp == 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (frame)->sp--; \
+    if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    union { int32_t i; float f; } _u = { .i = (frame)->stack[(frame)->sp] }; \
+    _u.f; \
+})
+
+#define STACK_POP_REF(frame) ({ \
+    if ((frame)->sp == 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (frame)->sp--; \
+    if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 1) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (void*)(uintptr_t)(frame)->stack[(frame)->sp]; \
+})
+
+// 64-bit stack operations
+#define STACK_PUSH_LONG(frame, value) ({ \
+    uint64_t _v = (value); \
+    uint32_t _high = (uint32_t)(_v >> 32); \
+    uint32_t _low  = (uint32_t)_v; \
+    (frame)->stack[(frame)->sp] = _high; \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->sp++; \
+    (frame)->stack[(frame)->sp] = _low; \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    (frame)->sp++; \
+})
+
+#define STACK_PUSH_DOUBLE(frame, value) ({ \
+    union { double d; uint64_t u; } _u = { .d = (value) }; \
+    STACK_PUSH_LONG(frame, _u.u); \
+})
+
+#define STACK_POP_LONG(frame) ({ \
+    if ((frame)->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (frame)->sp--; \
+    if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    uint32_t _low = (frame)->stack[(frame)->sp]; \
+    (frame)->sp--; \
+    if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
+    uint32_t _high = (frame)->stack[(frame)->sp]; \
+    ((uint64_t)_high << 32) | _low; \
+})
+
+#define STACK_POP_DOUBLE(frame) ({ \
+    uint64_t _u = STACK_POP_LONG(frame); \
+    union { uint64_t u; double d; } _conv = { .u = _u }; \
+    _conv.d; \
+})
+
+// Local variable stores
+#define LOCAL_STORE_INT(frame, value, idx) ({ \
+    (frame)->locals[idx] = (value); \
+    SHADOW_CLEAR_REF((frame)->shadow_locals, idx); \
+})
+
+#define LOCAL_STORE_FLOAT(frame, value, idx) ({ \
+    union { float f; int32_t i; } _u = { .f = (value) }; \
+    (frame)->locals[idx] = _u.i; \
+    SHADOW_CLEAR_REF((frame)->shadow_locals, idx); \
+})
+
+#define LOCAL_STORE_REF(frame, value, idx) ({ \
+    (frame)->locals[idx] = (int32_t)(uintptr_t)(value); \
+    SHADOW_SET_REF((frame)->shadow_locals, idx); \
+})
+
+#define LOCAL_STORE_LONG(frame, value, idx) ({ \
+    uint64_t _v = (value); \
+    uint32_t _high = (uint32_t)(_v >> 32); \
+    uint32_t _low  = (uint32_t)_v; \
+    (frame)->locals[idx] = _high; \
+    SHADOW_CLEAR_REF((frame)->shadow_locals, idx); \
+    (frame)->locals[idx + 1] = _low; \
+    SHADOW_CLEAR_REF((frame)->shadow_locals, idx + 1); \
+})
+
+#define LOCAL_STORE_DOUBLE(frame, value, idx) ({ \
+    union { double d; uint64_t u; } _u = { .d = (value) }; \
+    LOCAL_STORE_LONG(frame, _u.u, idx); \
+})
+
+// Local variable loads
+#define LOCAL_LOAD_INT(frame, idx) ({ \
+    if (SHADOW_GET_REF((frame)->shadow_locals, idx) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (frame)->locals[idx]; \
+})
+
+#define LOCAL_LOAD_FLOAT(frame, idx) ({ \
+    if (SHADOW_GET_REF((frame)->shadow_locals, idx) != 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    union { int32_t i; float f; } _u = { .i = (frame)->locals[idx] }; \
+    _u.f; \
+})
+
+#define LOCAL_LOAD_REF(frame, idx) ({ \
+    if (SHADOW_GET_REF((frame)->shadow_locals, idx) != 1) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    (void*)(uintptr_t)(frame)->locals[idx]; \
+})
+
+#define LOCAL_LOAD_LONG(frame, idx) ({ \
+    if (SHADOW_GET_REF((frame)->shadow_locals, idx) != 0 || \
+        SHADOW_GET_REF((frame)->shadow_locals, idx + 1) != 0) { \
+        err = JERR_TYPECHECK_FAILURE; goto exit; \
+    } \
+    uint32_t _high = (frame)->locals[idx]; \
+    uint32_t _low  = (frame)->locals[idx + 1]; \
+    ((uint64_t)_high << 32) | _low; \
+})
+
+#define LOCAL_LOAD_DOUBLE(frame, idx) ({ \
+    uint64_t _u = LOCAL_LOAD_LONG(frame, idx); \
+    union { uint64_t u; double d; } _conv = { .u = _u }; \
+    _conv.d; \
+})
+
+
 static Error_t native_method_invoke(Thread_t* thread, CallFrame_t* frame, Method_t* method){
     Error_t err = JERR_OK;
-    
-    int32_t* params = frame->stack -= method->arguments_size;
+
+    int32_t* args = &frame->stack[frame->sp -= method->args_slots];
 
     NativeMethod_t native = natives_find(stringpool_get(method->class->name_id), stringpool_get(method->name_id));
     FAIL_SET_JUMP(native, err, JERR_NOTFOUND, exit);
 
-    NativeMethodReturnValue_t retval = native(thread,method,params);
+    NativeMethodReturnValue_t retval = native(thread,method,args);
     FAIL_SET_JUMP(retval.err == JERR_OK, err, retval.err, exit);
 
-    memcpy(frame->stack, retval.value, method->return_size * sizeof(int32_t));
-    frame->stack += method->return_size;
+    switch(method->return_type){
+        case TYPE_INT:
+        case TYPE_CHAR:
+        case TYPE_SHORT:
+        case TYPE_BOOL:
+        case TYPE_BYTE:
+            STACK_PUSH_INT(frame, *(int32_t*)retval.value);
+            break;
+
+        case TYPE_REFERENCE:
+            STACK_PUSH_REF(frame, *(int32_t*)retval.value);
+            break;
+
+        case TYPE_FLOAT:
+            STACK_PUSH_FLOAT(frame, *(float*)retval.value);
+            break;    
+        
+        case TYPE_DOUBLE:
+            STACK_PUSH_DOUBLE(frame, *(double*)retval.value);
+            break;        
+
+        case TYPE_LONG:
+            STACK_PUSH_LONG(frame, *(int64_t*)retval.value);
+            break;
+
+        default: break;
+    }
 
 exit:
     if(err == JERR_EXCEPTION){
         assert(0 && "TODO: exceptions in native methods");
     }
     return err;
+}
+
+static bool interpreter_check_arguments(Method_t* method, uint32_t* shadow_stack, uint32_t sp){
+    for(unsigned i = 0; i < method->args_slots; i++){
+        if(SHADOW_GET_REF(shadow_stack, sp + i) != SHADOW_GET_REF(method->args_bitmap, i)) return false;
+    }
+
+    return true;
 }
 
 Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_value){
@@ -208,572 +392,587 @@ Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_va
                                                                     .code = (uint8_t[2]){EJOPCODE_RETURN, EJOPCODE_RETURN},
                                                                     .max_stack = 2,
                                                                    }});
+    if(method->flags.is_native){
+       assert(0 && "TODO:");
+    } else {
+        CallFrame_t* frame = thread_frame_push(&thread, method);
+        memcpy(frame->shadow_locals, method->args_bitmap, method->args_bitmap_size);
+        memcpy(frame->locals, arguments, method->args_slots * sizeof(int32_t));
 
-    CallFrame_t* frame = thread_frame_push(&thread, method);
-    FAIL_SET_JUMP(frame, err, JERR_OOM, exit);
-    memcpy(frame->locals, arguments, method->arguments_size * sizeof(int32_t));
+        FAIL_SET_JUMP((err = interpret_bytecode(&thread)) == JERR_OK, err, err, exit);
+    }
+    
+    switch(method->return_type){
+        case TYPE_INT:
+        case TYPE_BOOL:
+        case TYPE_BYTE:
+        case TYPE_SHORT:
+        case TYPE_CHAR:
+            *(int32_t*)return_value = STACK_POP_INT(retstub);
+            break;
 
-    FAIL_SET_JUMP((err = interpret_bytecode(&thread)) == JERR_OK, err, err, exit);
-    memcpy(return_value, (retstub->stack -= method->return_size), method->return_size * sizeof(int32_t));
+        case TYPE_REFERENCE:
+            *(void**)return_value = STACK_POP_REF(retstub);
+            break;
+
+        case TYPE_FLOAT:
+            *(float*)return_value = STACK_POP_FLOAT(retstub);
+            break;
+
+        case TYPE_LONG:
+            *(int64_t*)return_value = STACK_POP_LONG(retstub);
+            break;
+
+        case TYPE_DOUBLE:
+            *(double*)return_value = STACK_POP_DOUBLE(retstub);
+            break;
+
+        default: break;
+    }
 
 exit:
     return err;
 }
 
-static Error_t interpret_bytecode(Thread_t* thread){
+static Error_t interpret_bytecode(Thread_t* thread) {
     Error_t err = JERR_OK;
     size_t opcodes_executed = 0;
-    register CallFrame_t* frame = thread_frame_get(thread);
+    CallFrame_t* frame = thread_frame_get(thread);
 
     void* opcode_labels[256] = {
-        [EJOPCODE_ALOAD] = &&EJOPCODE_LOAD32,
-        [EJOPCODE_ALOAD_0] = &&EJOPCODE_LOAD32_0,
-        [EJOPCODE_ALOAD_1] = &&EJOPCODE_LOAD32_1,
-        [EJOPCODE_ALOAD_2] = &&EJOPCODE_LOAD32_2,
-        [EJOPCODE_ALOAD_3] = &&EJOPCODE_LOAD32_3,
+        // Loads (explicit per type)
+        [EJOPCODE_ILOAD]   = &&EJOPCODE_ILOAD,
+        [EJOPCODE_ILOAD_0] = &&EJOPCODE_ILOAD_0,
+        [EJOPCODE_ILOAD_1] = &&EJOPCODE_ILOAD_1,
+        [EJOPCODE_ILOAD_2] = &&EJOPCODE_ILOAD_2,
+        [EJOPCODE_ILOAD_3] = &&EJOPCODE_ILOAD_3,
 
-        [EJOPCODE_ILOAD] = &&EJOPCODE_LOAD32,
-        [EJOPCODE_ILOAD_0] = &&EJOPCODE_LOAD32_0,
-        [EJOPCODE_ILOAD_1] = &&EJOPCODE_LOAD32_1,
-        [EJOPCODE_ILOAD_2] = &&EJOPCODE_LOAD32_2,
-        [EJOPCODE_ILOAD_3] = &&EJOPCODE_LOAD32_3,
+        [EJOPCODE_FLOAD]   = &&EJOPCODE_FLOAD,
+        [EJOPCODE_FLOAD_0] = &&EJOPCODE_FLOAD_0,
+        [EJOPCODE_FLOAD_1] = &&EJOPCODE_FLOAD_1,
+        [EJOPCODE_FLOAD_2] = &&EJOPCODE_FLOAD_2,
+        [EJOPCODE_FLOAD_3] = &&EJOPCODE_FLOAD_3,
 
-        [EJOPCODE_FLOAD] = &&EJOPCODE_LOAD32,
-        [EJOPCODE_FLOAD_0] = &&EJOPCODE_LOAD32_0,
-        [EJOPCODE_FLOAD_1] = &&EJOPCODE_LOAD32_1,
-        [EJOPCODE_FLOAD_2] = &&EJOPCODE_LOAD32_2,
-        [EJOPCODE_FLOAD_3] = &&EJOPCODE_LOAD32_3,
+        [EJOPCODE_ALOAD]   = &&EJOPCODE_ALOAD,
+        [EJOPCODE_ALOAD_0] = &&EJOPCODE_ALOAD_0,
+        [EJOPCODE_ALOAD_1] = &&EJOPCODE_ALOAD_1,
+        [EJOPCODE_ALOAD_2] = &&EJOPCODE_ALOAD_2,
+        [EJOPCODE_ALOAD_3] = &&EJOPCODE_ALOAD_3,
 
-        [EJOPCODE_ASTORE] = &&EJOPCODE_STORE32,
-        [EJOPCODE_ASTORE_0] = &&EJOPCODE_STORE32_0,
-        [EJOPCODE_ASTORE_1] = &&EJOPCODE_STORE32_1,
-        [EJOPCODE_ASTORE_2] = &&EJOPCODE_STORE32_2,
-        [EJOPCODE_ASTORE_3] = &&EJOPCODE_STORE32_3,
+        // Stores (explicit per type)
+        [EJOPCODE_ISTORE]   = &&EJOPCODE_ISTORE,
+        [EJOPCODE_ISTORE_0] = &&EJOPCODE_ISTORE_0,
+        [EJOPCODE_ISTORE_1] = &&EJOPCODE_ISTORE_1,
+        [EJOPCODE_ISTORE_2] = &&EJOPCODE_ISTORE_2,
+        [EJOPCODE_ISTORE_3] = &&EJOPCODE_ISTORE_3,
 
-        [EJOPCODE_ISTORE] = &&EJOPCODE_STORE32,
-        [EJOPCODE_ISTORE_0] = &&EJOPCODE_STORE32_0,
-        [EJOPCODE_ISTORE_1] = &&EJOPCODE_STORE32_1,
-        [EJOPCODE_ISTORE_2] = &&EJOPCODE_STORE32_2,
-        [EJOPCODE_ISTORE_3] = &&EJOPCODE_STORE32_3,
+        [EJOPCODE_FSTORE]   = &&EJOPCODE_FSTORE,
+        [EJOPCODE_FSTORE_0] = &&EJOPCODE_FSTORE_0,
+        [EJOPCODE_FSTORE_1] = &&EJOPCODE_FSTORE_1,
+        [EJOPCODE_FSTORE_2] = &&EJOPCODE_FSTORE_2,
+        [EJOPCODE_FSTORE_3] = &&EJOPCODE_FSTORE_3,
 
-        [EJOPCODE_FSTORE] = &&EJOPCODE_STORE32,
-        [EJOPCODE_FSTORE_0] = &&EJOPCODE_STORE32_0,
-        [EJOPCODE_FSTORE_1] = &&EJOPCODE_STORE32_1,
-        [EJOPCODE_FSTORE_2] = &&EJOPCODE_STORE32_2,
-        [EJOPCODE_FSTORE_3] = &&EJOPCODE_STORE32_3,
+        [EJOPCODE_ASTORE]   = &&EJOPCODE_ASTORE,
+        [EJOPCODE_ASTORE_0] = &&EJOPCODE_ASTORE_0,
+        [EJOPCODE_ASTORE_1] = &&EJOPCODE_ASTORE_1,
+        [EJOPCODE_ASTORE_2] = &&EJOPCODE_ASTORE_2,
+        [EJOPCODE_ASTORE_3] = &&EJOPCODE_ASTORE_3,
 
-        [EJOPCODE_ICONST_0] = &&EJOPCODE_ICONST_0,
-        [EJOPCODE_ICONST_1] = &&EJOPCODE_ICONST_1,
-        [EJOPCODE_ICONST_2] = &&EJOPCODE_ICONST_2,
-        [EJOPCODE_ICONST_3] = &&EJOPCODE_ICONST_3,
-        [EJOPCODE_ICONST_4] = &&EJOPCODE_ICONST_4,
-        [EJOPCODE_ICONST_5] = &&EJOPCODE_ICONST_5,
-        [EJOPCODE_ICONST_M1] = &&EJOPCODE_ICONST_M1,
+        // Constants
+        [EJOPCODE_ICONST_0]   = &&EJOPCODE_ICONST_0,
+        [EJOPCODE_ICONST_1]   = &&EJOPCODE_ICONST_1,
+        [EJOPCODE_ICONST_2]   = &&EJOPCODE_ICONST_2,
+        [EJOPCODE_ICONST_3]   = &&EJOPCODE_ICONST_3,
+        [EJOPCODE_ICONST_4]   = &&EJOPCODE_ICONST_4,
+        [EJOPCODE_ICONST_5]   = &&EJOPCODE_ICONST_5,
+        [EJOPCODE_ICONST_M1]  = &&EJOPCODE_ICONST_M1,
 
-        [EJOPCODE_PUTSTATIC] = &&EJOPCODE_PUTSTATIC,
-        [EJOPCODE_GETSTATIC] = &&EJOPCODE_GETSTATIC,
+        [EJOPCODE_PUTSTATIC]  = &&EJOPCODE_PUTSTATIC,
+        [EJOPCODE_GETSTATIC]  = &&EJOPCODE_GETSTATIC,
 
-        [EJOPCODE_BIPUSH] = &&EJOPCODE_BIPUSH,
-        [EJOPCODE_SIPUSH] = &&EJOPCODE_SIPUSH,
+        [EJOPCODE_BIPUSH]     = &&EJOPCODE_BIPUSH,
+        [EJOPCODE_SIPUSH]     = &&EJOPCODE_SIPUSH,
 
-        [EJOPCODE_RETURN] = &&EJOPCODE_RETURN,
-        [EJOPCODE_IRETURN] = &&EJOPCODE_IRETURN,
-        [EJOPCODE_FRETURN] = &&EJOPCODE_FRETURN,
-        [EJOPCODE_LRETURN] = &&EJOPCODE_LRETURN,
-        [EJOPCODE_DRETURN] = &&EJOPCODE_DRETURN,
-        [EJOPCODE_ARETURN] = &&EJOPCODE_ARETURN,
+        [EJOPCODE_RETURN]     = &&EJOPCODE_RETURN,
+        [EJOPCODE_IRETURN]    = &&EJOPCODE_IRETURN,
+        [EJOPCODE_FRETURN]    = &&EJOPCODE_FRETURN,
+        [EJOPCODE_LRETURN]    = &&EJOPCODE_LRETURN,
+        [EJOPCODE_DRETURN]    = &&EJOPCODE_DRETURN,
+        [EJOPCODE_ARETURN]    = &&EJOPCODE_ARETURN,
 
-        [EJOPCODE_IF_ICMPEQ] = &&EJOPCODE_IF_ICMPEQ,
-        [EJOPCODE_IF_ICMPNE] = &&EJOPCODE_IF_ICMPNE,
-        [EJOPCODE_IF_ICMPGE] = &&EJOPCODE_IF_ICMPGE,
-        [EJOPCODE_IF_ICMPGT] = &&EJOPCODE_IF_ICMPGT,
-        [EJOPCODE_IF_ICMPLE] = &&EJOPCODE_IF_ICMPLE,
-        [EJOPCODE_IF_ICMPLT] = &&EJOPCODE_IF_ICMPLT,
+        [EJOPCODE_IF_ICMPEQ]  = &&EJOPCODE_IF_ICMPEQ,
+        [EJOPCODE_IF_ICMPNE]  = &&EJOPCODE_IF_ICMPNE,
+        [EJOPCODE_IF_ICMPGE]  = &&EJOPCODE_IF_ICMPGE,
+        [EJOPCODE_IF_ICMPGT]  = &&EJOPCODE_IF_ICMPGT,
+        [EJOPCODE_IF_ICMPLE]  = &&EJOPCODE_IF_ICMPLE,
+        [EJOPCODE_IF_ICMPLT]  = &&EJOPCODE_IF_ICMPLT,
 
-        [EJOPCODE_IADD] = &&EJOPCODE_IADD,
-        [EJOPCODE_ISUB] = &&EJOPCODE_ISUB,
-        [EJOPCODE_IMUL] = &&EJOPCODE_IMUL,
-        [EJOPCODE_IDIV] = &&EJOPCODE_IDIV,
-        [EJOPCODE_IREM] = &&EJOPCODE_IREM,
+        [EJOPCODE_IADD]       = &&EJOPCODE_IADD,
+        [EJOPCODE_ISUB]       = &&EJOPCODE_ISUB,
+        [EJOPCODE_IMUL]       = &&EJOPCODE_IMUL,
+        [EJOPCODE_IDIV]       = &&EJOPCODE_IDIV,
+        [EJOPCODE_IREM]       = &&EJOPCODE_IREM,
 
-        [EJOPCODE_LADD] = &&EJOPCODE_LADD,
-        [EJOPCODE_LSUB] = &&EJOPCODE_LSUB,
-        [EJOPCODE_LMUL] = &&EJOPCODE_LMUL,
-        [EJOPCODE_LDIV] = &&EJOPCODE_LDIV,
-        [EJOPCODE_LREM] = &&EJOPCODE_LREM,
+        [EJOPCODE_LADD]       = &&EJOPCODE_LADD,
+        [EJOPCODE_LSUB]       = &&EJOPCODE_LSUB,
+        [EJOPCODE_LMUL]       = &&EJOPCODE_LMUL,
+        [EJOPCODE_LDIV]       = &&EJOPCODE_LDIV,
+        [EJOPCODE_LREM]       = &&EJOPCODE_LREM,
 
-        [EJOPCODE_FADD] = &&EJOPCODE_FADD,
-        [EJOPCODE_FSUB] = &&EJOPCODE_FSUB,
-        [EJOPCODE_FMUL] = &&EJOPCODE_FMUL,
-        [EJOPCODE_FDIV] = &&EJOPCODE_FDIV,
-        [EJOPCODE_FREM] = &&EJOPCODE_FREM,
+        [EJOPCODE_FADD]       = &&EJOPCODE_FADD,
+        [EJOPCODE_FSUB]       = &&EJOPCODE_FSUB,
+        [EJOPCODE_FMUL]       = &&EJOPCODE_FMUL,
+        [EJOPCODE_FDIV]       = &&EJOPCODE_FDIV,
+        [EJOPCODE_FREM]       = &&EJOPCODE_FREM,
 
-        [EJOPCODE_DADD] = &&EJOPCODE_DADD,
-        [EJOPCODE_DSUB] = &&EJOPCODE_DSUB,
-        [EJOPCODE_DMUL] = &&EJOPCODE_DMUL,
-        [EJOPCODE_DDIV] = &&EJOPCODE_DDIV,
-        [EJOPCODE_DREM] = &&EJOPCODE_DREM,
+        [EJOPCODE_DADD]       = &&EJOPCODE_DADD,
+        [EJOPCODE_DSUB]       = &&EJOPCODE_DSUB,
+        [EJOPCODE_DMUL]       = &&EJOPCODE_DMUL,
+        [EJOPCODE_DDIV]       = &&EJOPCODE_DDIV,
+        [EJOPCODE_DREM]       = &&EJOPCODE_DREM,
 
-        [EJOPCODE_IINC] = &&EJOPCODE_IINC,
-        [EJOPCODE_GOTO] = &&EJOPCODE_GOTO,
-        [EJOPCODE_JSR] = &&EJOPCODE_JSR,
-        [EJOPCODE_JSR_W] = &&EJOPCODE_JSR_W,
-        [EJOPCODE_RET] = &&EJOPCODE_RET,
+        [EJOPCODE_IINC]       = &&EJOPCODE_IINC,
+        [EJOPCODE_GOTO]       = &&EJOPCODE_GOTO,
+        [EJOPCODE_JSR]        = &&EJOPCODE_JSR,
+        [EJOPCODE_JSR_W]      = &&EJOPCODE_JSR_W,
+        [EJOPCODE_RET]        = &&EJOPCODE_RET,
 
-        [EJOPCODE_INVOKESTATIC] = &&EJOPCODE_INVOKESTATIC,
+        [EJOPCODE_INVOKESTATIC]  = &&EJOPCODE_INVOKESTATIC,
         [EJOPCODE_INVOKESPECIAL] = &&EJOPCODE_INVOKESPECIAL,
+        [EJOPCODE_DUP]           = &&EJOPCODE_DUP,
     };
 
-    #define NEXT() ({if(opcodes_executed++ == thread->opcode_quota && thread->opcode_quota > 0) return JERR_SCHEDULE; goto *opcode_labels[*(frame->pc += (1 + JOpcode_args_sizes[*frame->pc]))];})
+    // Helper to advance PC and jump to next opcode
+    #define NEXT() ({ \
+        if (opcodes_executed++ == thread->opcode_quota && thread->opcode_quota > 0) \
+            return JERR_SCHEDULE; \
+        frame->pc += 1 + JOpcode_args_sizes[*frame->pc]; \
+        goto *opcode_labels[*frame->pc]; \
+    })
 
-
+    // -----------------------------------------------------------------
+    // Interpreter starts here
+    // -----------------------------------------------------------------
     goto *opcode_labels[*frame->pc];
-    EJOPCODE_LOAD32:
-        memcpy(frame->stack++, &frame->locals[*(frame->pc + 1)], sizeof(uint32_t));
+
+    // ========== LOADS ==========
+    EJOPCODE_ILOAD:
+        STACK_PUSH_INT(frame, LOCAL_LOAD_INT(frame, *(frame->pc + 1)));
         NEXT();
 
-    
-    EJOPCODE_LOAD32_0:
-        memcpy(frame->stack++, &frame->locals[0], sizeof(uint32_t));
+    EJOPCODE_ILOAD_0:
+        STACK_PUSH_INT(frame, LOCAL_LOAD_INT(frame, 0));
         NEXT();
-    EJOPCODE_LOAD32_1:
-        memcpy(frame->stack++, &frame->locals[1], sizeof(uint32_t));
+    EJOPCODE_ILOAD_1:
+        STACK_PUSH_INT(frame, LOCAL_LOAD_INT(frame, 1));
         NEXT();
-    EJOPCODE_LOAD32_2:
-        memcpy(frame->stack++, &frame->locals[2], sizeof(uint32_t));
+    EJOPCODE_ILOAD_2:
+        STACK_PUSH_INT(frame, LOCAL_LOAD_INT(frame, 2));
         NEXT();
-    EJOPCODE_LOAD32_3:
-        memcpy(frame->stack++, &frame->locals[3], sizeof(uint32_t));
-        NEXT();
-
-    EJOPCODE_STORE32:
-        memcpy(&frame->locals[*(frame->pc + 1)], --frame->stack, sizeof(uint32_t));
+    EJOPCODE_ILOAD_3:
+        STACK_PUSH_INT(frame, LOCAL_LOAD_INT(frame, 3));
         NEXT();
 
-    EJOPCODE_STORE32_0:
-        memcpy(&frame->locals[0], --frame->stack, sizeof(uint32_t));
-        NEXT();
-    EJOPCODE_STORE32_1:
-        memcpy(&frame->locals[1], --frame->stack, sizeof(uint32_t));
-        NEXT();
-    EJOPCODE_STORE32_2:
-        memcpy(&frame->locals[2], --frame->stack, sizeof(uint32_t));
-        NEXT();
-    EJOPCODE_STORE32_3:
-        memcpy(&frame->locals[3], --frame->stack, sizeof(uint32_t));
+    EJOPCODE_FLOAD:
+        STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, *(frame->pc + 1)));
         NEXT();
 
+    EJOPCODE_FLOAD_0:
+        STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, 0));
+        NEXT();
+    EJOPCODE_FLOAD_1:
+        STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, 1));
+        NEXT();
+    EJOPCODE_FLOAD_2:
+        STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, 2));
+        NEXT();
+    EJOPCODE_FLOAD_3:
+        STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, 3));
+        NEXT();
 
+    EJOPCODE_ALOAD:
+        STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, *(frame->pc + 1)));
+        NEXT();
+
+    EJOPCODE_ALOAD_0:
+        STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, 0));
+        NEXT();
+    EJOPCODE_ALOAD_1:
+        STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, 1));
+        NEXT();
+    EJOPCODE_ALOAD_2:
+        STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, 2));
+        NEXT();
+    EJOPCODE_ALOAD_3:
+        STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, 3));
+        NEXT();
+
+    // ========== STORES ==========
+    EJOPCODE_ISTORE:
+        LOCAL_STORE_INT(frame, STACK_POP_INT(frame), *(frame->pc + 1));
+        NEXT();
+
+    EJOPCODE_ISTORE_0:
+        LOCAL_STORE_INT(frame, STACK_POP_INT(frame), 0);
+        NEXT();
+    EJOPCODE_ISTORE_1:
+        LOCAL_STORE_INT(frame, STACK_POP_INT(frame), 1);
+        NEXT();
+    EJOPCODE_ISTORE_2:
+        LOCAL_STORE_INT(frame, STACK_POP_INT(frame), 2);
+        NEXT();
+    EJOPCODE_ISTORE_3:
+        LOCAL_STORE_INT(frame, STACK_POP_INT(frame), 3);
+        NEXT();
+
+    EJOPCODE_FSTORE:
+        LOCAL_STORE_FLOAT(frame, STACK_POP_FLOAT(frame), *(frame->pc + 1));
+        NEXT();
+
+    EJOPCODE_FSTORE_0:
+        LOCAL_STORE_FLOAT(frame, STACK_POP_FLOAT(frame), 0);
+        NEXT();
+    EJOPCODE_FSTORE_1:
+        LOCAL_STORE_FLOAT(frame, STACK_POP_FLOAT(frame), 1);
+        NEXT();
+    EJOPCODE_FSTORE_2:
+        LOCAL_STORE_FLOAT(frame, STACK_POP_FLOAT(frame), 2);
+        NEXT();
+    EJOPCODE_FSTORE_3:
+        LOCAL_STORE_FLOAT(frame, STACK_POP_FLOAT(frame), 3);
+        NEXT();
+
+    EJOPCODE_ASTORE:
+        LOCAL_STORE_REF(frame, STACK_POP_REF(frame), *(frame->pc + 1));
+        NEXT();
+
+    EJOPCODE_ASTORE_0:
+        LOCAL_STORE_REF(frame, STACK_POP_REF(frame), 0);
+        NEXT();
+    EJOPCODE_ASTORE_1:
+        LOCAL_STORE_REF(frame, STACK_POP_REF(frame), 1);
+        NEXT();
+    EJOPCODE_ASTORE_2:
+        LOCAL_STORE_REF(frame, STACK_POP_REF(frame), 2);
+        NEXT();
+    EJOPCODE_ASTORE_3:
+        LOCAL_STORE_REF(frame, STACK_POP_REF(frame), 3);
+        NEXT();
+
+    // ========== CONSTANTS ==========
     EJOPCODE_ICONST_0:
-        *(frame->stack++) = 0;
+        STACK_PUSH_INT(frame, 0);
         NEXT();
     EJOPCODE_ICONST_1:
-        *(frame->stack++) = 1;
+        STACK_PUSH_INT(frame, 1);
         NEXT();
     EJOPCODE_ICONST_2:
-        *(frame->stack++) = 2;
+        STACK_PUSH_INT(frame, 2);
         NEXT();
     EJOPCODE_ICONST_3:
-        *(frame->stack++) = 3;
+        STACK_PUSH_INT(frame, 3);
         NEXT();
     EJOPCODE_ICONST_4:
-        *(frame->stack++) = 4;
+        STACK_PUSH_INT(frame, 4);
         NEXT();
     EJOPCODE_ICONST_5:
-        *(frame->stack++) = 5;
+        STACK_PUSH_INT(frame, 5);
         NEXT();
-
     EJOPCODE_ICONST_M1:
-        *(frame->stack++) = -1;
+        STACK_PUSH_INT(frame, -1);
         NEXT();
-
-
 
     EJOPCODE_BIPUSH:
-        *(frame->stack++) = *(int8_t*)(frame->pc + 1);
+        STACK_PUSH_INT(frame, (int32_t)*(int8_t*)(frame->pc + 1));
         NEXT();
-    
+
     EJOPCODE_SIPUSH:
-        *(frame->stack++) = be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+        STACK_PUSH_INT(frame, (int32_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)));
         NEXT();
-    
 
+    // ========== RETURNS ==========
     EJOPCODE_RETURN:
-        if(!(frame = thread_frame_pop(thread))) goto exit; //Root method exit!
+        if (!(frame = thread_frame_pop(thread)))
+            goto exit;   // root method exit
         NEXT();
 
-    
-    EJOPCODE_IRETURN:
-    EJOPCODE_FRETURN:
-    EJOPCODE_ARETURN:{
-        uint32_t retval = 0;
-        int32_t* dest = --frame->stack;
-        memcpy(&retval, dest, sizeof(uint32_t));
-
-        if((frame = thread_frame_pop(thread))){
-            int32_t* target = frame->stack;
-
-            memcpy(target, &retval, sizeof(uint32_t));
-            frame->stack++;
-            NEXT();
-        } else return JERR_ORPHAN_RETURN;
+    EJOPCODE_IRETURN: {
+        int32_t ret = STACK_POP_INT(frame);
+        if (!(frame = thread_frame_pop(thread)))
+            return JERR_ORPHAN_RETURN;
+        STACK_PUSH_INT(frame, ret);
+        NEXT();
     }
 
-    EJOPCODE_LRETURN:
-    EJOPCODE_DRETURN:{
-        uint64_t retval = 0;
-        int64_t* dest = (int64_t*)(frame->stack -= 2);
-        memcpy(&retval, dest, sizeof(uint64_t));
-
-        if((frame = thread_frame_pop(thread))){
-            int64_t* target = (int64_t*)frame->stack;
-
-            memcpy(target, &retval, sizeof(uint64_t));
-            frame->stack += 2;
-
-            NEXT();
-        } else return JERR_ORPHAN_RETURN;
+    EJOPCODE_FRETURN: {
+        float ret = STACK_POP_FLOAT(frame);
+        if (!(frame = thread_frame_pop(thread)))
+            return JERR_ORPHAN_RETURN;
+        STACK_PUSH_FLOAT(frame, ret);
+        NEXT();
     }
 
-    EJOPCODE_PUTSTATIC:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*((uint16_t*)(frame->pc + 1)))];
+    EJOPCODE_ARETURN: {
+        void* ret = STACK_POP_REF(frame);
+        if (!(frame = thread_frame_pop(thread)))
+            return JERR_ORPHAN_RETURN;
+        STACK_PUSH_REF(frame, ret);
+        NEXT();
+    }
+
+    EJOPCODE_LRETURN: {
+        uint64_t ret = STACK_POP_LONG(frame);
+        if (!(frame = thread_frame_pop(thread)))
+            return JERR_ORPHAN_RETURN;
+        STACK_PUSH_LONG(frame, ret);
+        NEXT();
+    }
+
+    EJOPCODE_DRETURN: {
+        double ret = STACK_POP_DOUBLE(frame);
+        if (!(frame = thread_frame_pop(thread)))
+            return JERR_ORPHAN_RETURN;
+        STACK_PUSH_DOUBLE(frame, ret);
+        NEXT();
+    }
+
+    // ========== FIELD ACCESS ==========
+    EJOPCODE_PUTSTATIC: {
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
         FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
-
-        unsigned sz = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
-        void* mem = (frame->method->class->static_fields_storage + field->offset);
+        void* mem = (int32_t*)frame->method->class->static_fields_storage + field->offset;
 
         field->constantvalue = NULL;
-        frame->stack -= (sz >> 2);
-        memcpy(mem, frame->stack, sz);
 
+        switch(field->type){
+            case TYPE_BOOL:
+            case TYPE_BYTE:
+            case TYPE_CHAR:
+            case TYPE_SHORT:
+            case TYPE_INT:
+                *(int32_t*)mem = STACK_POP_INT(frame);
+                break;
+
+            case TYPE_REFERENCE:
+                *(void**)mem = STACK_POP_REF(frame);
+                break;
+
+            case TYPE_FLOAT:
+                *(float*)mem = STACK_POP_FLOAT(frame);
+                break;
+
+            case TYPE_DOUBLE:
+                *(double*)mem = STACK_POP_DOUBLE(frame);
+                break;
+
+            case TYPE_LONG:
+                *(int64_t*)mem = STACK_POP_LONG(frame);
+                break;
+
+            default: break;
+        }
         NEXT();
     }
 
-    EJOPCODE_GETSTATIC:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*((uint16_t*)(frame->pc + 1)))];
+    EJOPCODE_GETSTATIC: {
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
         FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
+        void* mem = (int32_t*)frame->method->class->static_fields_storage + field->offset;
 
-        unsigned sz = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
-        void* mem = (frame->method->class->static_fields_storage + field->offset);
-        
-        if(field->constantvalue){
+        if (field->constantvalue) {
             FAIL_SET_JUMP((err = class_resolv_symbol(field->constantvalue)) == JERR_OK, err, err, exit);
-            memcpy(mem, field->constantvalue->type == SYMBOL_STRING ? &field->constantvalue->value : field->constantvalue->value, sz);
-
+            memcpy(mem, (field->constantvalue->type == SYMBOL_STRING) ? &field->constantvalue->value : field->constantvalue->value,
+                   ((field->type == TYPE_LONG || field->type == TYPE_DOUBLE) ? 2 : 1) * sizeof(int32_t));
             field->constantvalue = NULL;
         }
-        memcpy(frame->stack, mem, sz);
-        frame->stack += (sz >> 2);
 
+        switch(field->type){
+            case TYPE_REFERENCE:
+                STACK_PUSH_REF(frame, *(int32_t*)mem);
+                break;
+            
+            case TYPE_FLOAT:
+                STACK_PUSH_FLOAT(frame, *(float*)mem);
+                break;
+
+            case TYPE_SHORT:
+            case TYPE_BYTE:
+            case TYPE_CHAR:
+            case TYPE_BOOL:
+            case TYPE_INT:
+                STACK_PUSH_INT(frame, *(int32_t*)mem);
+                break;
+
+            case TYPE_DOUBLE:
+                STACK_PUSH_DOUBLE(frame, *(double*)mem);
+                break;
+
+            case TYPE_LONG:
+                STACK_PUSH_LONG(frame, *(int64_t*)mem);
+                break;
+
+            default: break;
+        }
         NEXT();
     }
 
+    // ========== METHOD INVOCATION ==========
     EJOPCODE_INVOKESPECIAL:
-    EJOPCODE_INVOKESTATIC:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*((uint16_t*)(frame->pc + 1)))];
+    EJOPCODE_INVOKESTATIC: {
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
         FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
-        
+
         Method_t* method = sym->value;
 
-        if(!method->flags.is_native){
-            FAIL_SET_JUMP((frame = thread_frame_push(thread, method)), err, JERR_OOM, exit);
-            memcpy(frame->locals, (frame->prev->stack -= method->arguments_size), method->arguments_size * sizeof(int32_t));
+        if (!method->flags.is_native) {
+            CallFrame_t* new_frame = thread_frame_push(thread, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
 
+            int32_t* args = &frame->stack[frame->sp -= method->args_slots];
+            FAIL_SET_JUMP(interpreter_check_arguments(method, frame->shadow_stack, frame->sp), err, JERR_TYPECHECK_FAILURE, exit);
+
+            memcpy(new_frame->shadow_locals, method->args_bitmap, method->args_bitmap_size);
+            memcpy(new_frame->locals, args, method->args_slots * sizeof(int32_t));
+
+            frame = new_frame;
             goto *opcode_labels[*frame->pc];
-        } else FAIL_SET_JUMP((err = native_method_invoke(thread, frame, method)) == JERR_OK, err, err, exit);
+        } else {
+            FAIL_SET_JUMP((err = native_method_invoke(thread, frame, method)) == JERR_OK, err, err, exit);
+            NEXT();
+        }
+    }
 
+    // ========== CONDITIONAL BRANCHES (int) ==========
+    #define IF_CMP(OP) ({ \
+        int32_t v2 = STACK_POP_INT(frame); \
+        int32_t v1 = STACK_POP_INT(frame); \
+        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)); \
+        if (v1 OP v2) {frame->pc += offset; goto *opcode_labels[*frame->pc];}\
+        NEXT(); \
+    })
+
+    EJOPCODE_IF_ICMPEQ: IF_CMP(==);
+    EJOPCODE_IF_ICMPNE: IF_CMP(!=);
+    EJOPCODE_IF_ICMPLT: IF_CMP(<);
+    EJOPCODE_IF_ICMPLE: IF_CMP(<=);
+    EJOPCODE_IF_ICMPGT: IF_CMP(>);
+    EJOPCODE_IF_ICMPGE: IF_CMP(>=);
+
+    // ========== INTEGER ARITHMETIC ==========
+    #define BINARY_INT(OP) do { \
+        int32_t v2 = STACK_POP_INT(frame); \
+        int32_t v1 = STACK_POP_INT(frame); \
+        STACK_PUSH_INT(frame, v1 OP v2); \
+        NEXT(); \
+    } while (0)
+
+    EJOPCODE_IADD: BINARY_INT(+);
+    EJOPCODE_ISUB: BINARY_INT(-);
+    EJOPCODE_IMUL: BINARY_INT(*);
+    EJOPCODE_IDIV: BINARY_INT(/);
+    EJOPCODE_IREM: BINARY_INT(%);
+
+    // ========== LONG ARITHMETIC ==========
+    #define BINARY_LONG(OP) do { \
+        uint64_t v2 = STACK_POP_LONG(frame); \
+        uint64_t v1 = STACK_POP_LONG(frame); \
+        STACK_PUSH_LONG(frame, v1 OP v2); \
+        NEXT(); \
+    } while (0)
+
+    EJOPCODE_LADD: BINARY_LONG(+);
+    EJOPCODE_LSUB: BINARY_LONG(-);
+    EJOPCODE_LMUL: BINARY_LONG(*);
+    EJOPCODE_LDIV: BINARY_LONG(/);
+    EJOPCODE_LREM: BINARY_LONG(%);
+
+    // ========== FLOAT ARITHMETIC ==========
+    #define BINARY_FLOAT(OP) do { \
+        float v2 = STACK_POP_FLOAT(frame); \
+        float v1 = STACK_POP_FLOAT(frame); \
+        STACK_PUSH_FLOAT(frame, v1 OP v2); \
+        NEXT(); \
+    } while (0)
+
+    EJOPCODE_FADD: BINARY_FLOAT(+);
+    EJOPCODE_FSUB: BINARY_FLOAT(-);
+    EJOPCODE_FMUL: BINARY_FLOAT(*);
+    EJOPCODE_FDIV: BINARY_FLOAT(/);
+    EJOPCODE_FREM: { float v2 = STACK_POP_FLOAT(frame); float v1 = STACK_POP_FLOAT(frame); STACK_PUSH_FLOAT(frame, fmodf(v1, v2)); NEXT(); }
+
+    // ========== DOUBLE ARITHMETIC ==========
+    #define BINARY_DOUBLE(OP) do { \
+        double v2 = STACK_POP_DOUBLE(frame); \
+        double v1 = STACK_POP_DOUBLE(frame); \
+        STACK_PUSH_DOUBLE(frame, v1 OP v2); \
+        NEXT(); \
+    } while (0)
+
+    EJOPCODE_DADD: BINARY_DOUBLE(+);
+    EJOPCODE_DSUB: BINARY_DOUBLE(-);
+    EJOPCODE_DMUL: BINARY_DOUBLE(*);
+    EJOPCODE_DDIV: BINARY_DOUBLE(/);
+    EJOPCODE_DREM: { double v2 = STACK_POP_DOUBLE(frame); double v1 = STACK_POP_DOUBLE(frame); STACK_PUSH_DOUBLE(frame, fmod(v1, v2)); NEXT(); }
+
+    // ========== IINC ==========
+    EJOPCODE_IINC: {
+        uint8_t idx = *(frame->pc + 1);
+        int8_t inc = *(frame->pc + 2);
+        int32_t old = LOCAL_LOAD_INT(frame, idx);
+        LOCAL_STORE_INT(frame, old + inc, idx);
         NEXT();
     }
 
-    EJOPCODE_IF_ICMPEQ:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 == value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IF_ICMPNE:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 != value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IF_ICMPLT:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 < value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IF_ICMPLE:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 <= value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IF_ICMPGT:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 > value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IF_ICMPGE:{
-        int16_t offset = (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        if(value1 >= value2){
-            frame->pc += offset;
-            goto *opcode_labels[*frame->pc];
-        } else NEXT();
-    }
-
-    EJOPCODE_IADD:{
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        *(frame->stack++) = value1 + value2;
-        NEXT();
-    }
-
-    EJOPCODE_ISUB:{
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        *(frame->stack++) = value1 - value2;
-        NEXT();
-    }
-
-    EJOPCODE_IMUL:{
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        *(frame->stack++) = value1 * value2;
-        NEXT();
-    }
-
-    EJOPCODE_IDIV:{
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        *(frame->stack++) = value1 / value2;
-        NEXT();
-    }
-
-    EJOPCODE_IREM:{
-        int32_t value2 = *(--frame->stack);
-        int32_t value1 = *(--frame->stack);
-
-        *(frame->stack++) = value1 % value2;
-        NEXT();
-    }
-
-    EJOPCODE_LADD:{
-        int64_t value2 = *(int64_t*)(frame->stack -= 2);
-        int64_t value1 = *(int64_t*)(frame->stack -= 2);
-
-        *(int64_t*)(frame->stack) = value1 + value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_LSUB:{
-        int64_t value2 = *(int64_t*)(frame->stack -= 2);
-        int64_t value1 = *(int64_t*)(frame->stack -= 2);
-
-        *(int64_t*)(frame->stack) = value1 - value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_LMUL:{
-        int64_t value2 = *(int64_t*)(frame->stack -= 2);
-        int64_t value1 = *(int64_t*)(frame->stack -= 2);
-
-        *(int64_t*)(frame->stack) = value1 * value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_LDIV:{
-        int64_t value2 = *(int64_t*)(frame->stack -= 2);
-        int64_t value1 = *(int64_t*)(frame->stack -= 2);
-
-        *(int64_t*)(frame->stack) = value1 / value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_LREM:{
-        int64_t value2 = *(int64_t*)(frame->stack -= 2);
-        int64_t value1 = *(int64_t*)(frame->stack -= 2);
-
-        *(int64_t*)(frame->stack) = value1 % value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_FADD:{
-        float value2 = *(float*)(--frame->stack);
-        float value1 = *(float*)(--frame->stack);
-
-        *(float*)(frame->stack++) = value1 + value2;
-        NEXT();
-    }
-
-    EJOPCODE_FSUB:{
-        float value2 = *(float*)(--frame->stack);
-        float value1 = *(float*)(--frame->stack);
-
-        *(float*)(frame->stack++) = value1 - value2;
-        NEXT();
-    }
-
-    EJOPCODE_FMUL:{
-        float value2 = *(float*)(--frame->stack);
-        float value1 = *(float*)(--frame->stack);
-
-        *(float*)(frame->stack++) = value1 * value2;
-        NEXT();
-    }
-
-    EJOPCODE_FDIV:{
-        float value2 = *(float*)(--frame->stack);
-        float value1 = *(float*)(--frame->stack);
-
-        *(float*)(frame->stack++) = value1 / value2;
-        NEXT();
-    }
-
-    EJOPCODE_FREM:{
-        float value2 = *(float*)(--frame->stack);
-        float value1 = *(float*)(--frame->stack);
-
-        *(float*)(frame->stack++) = fmod(value1, value2);
-        NEXT();
-    }
-
-    EJOPCODE_DADD:{
-        double value2 = *(double*)(frame->stack -= 2);
-        double value1 = *(double*)(frame->stack -= 2);
-
-        *(double*)(frame->stack) = value1 + value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_DSUB:{
-        double value2 = *(double*)(frame->stack -= 2);
-        double value1 = *(double*)(frame->stack -= 2);
-
-        *(double*)(frame->stack) = value1 - value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_DMUL:{
-        double value2 = *(double*)(frame->stack -= 2);
-        double value1 = *(double*)(frame->stack -= 2);
-
-        *(double*)(frame->stack) = value1 * value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_DDIV:{
-        double value2 = *(double*)(frame->stack -= 2);
-        double value1 = *(double*)(frame->stack -= 2);
-
-        *(double*)(frame->stack) = value1 / value2;
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_DREM:{
-        double value2 = *(double*)(frame->stack -= 2);
-        double value1 = *(double*)(frame->stack -= 2);
-
-        *(double*)(frame->stack) = fmod(value1,value2);
-        
-        frame->stack += 2;
-        NEXT();
-    }
-
-    EJOPCODE_IINC:{
-        uint8_t index = *(frame->pc + 1);
-        int8_t constant = *(frame->pc + 2);
-
-        frame->locals[index] += constant;
-        NEXT();
-    }
-
-    EJOPCODE_GOTO:{
-        frame->pc += (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
+    // ========== GOTO & JSR ==========
+    EJOPCODE_GOTO: {
+        frame->pc += (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
         goto *opcode_labels[*frame->pc];
     }
 
-    //Will not work on 64bit platforms
-    EJOPCODE_JSR:{
-        *(uint32_t*)(frame->stack++) = (uint32_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc]));
-        frame->pc += (int16_t)be16_to_cpu(*((int16_t*)(frame->pc + 1)));
-
+    EJOPCODE_JSR: {
+        STACK_PUSH_INT(frame, (int32_t)(uintptr_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc])));
+        frame->pc += (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
         goto *opcode_labels[*frame->pc];
     }
 
-    EJOPCODE_JSR_W:{
-        *(uint32_t*)(frame->stack++) = (uint32_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc]));
-        frame->pc += (int16_t)be32_to_cpu(*((int32_t*)(frame->pc + 1)));
-
+    EJOPCODE_JSR_W: {
+        STACK_PUSH_INT(frame, (int32_t)(uintptr_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc])));
+        frame->pc += (int32_t)be32_to_cpu(*(int32_t*)(frame->pc + 1));
         goto *opcode_labels[*frame->pc];
     }
 
-    EJOPCODE_RET:{
-        frame->pc = (uint8_t*)frame->locals[*(frame->pc + 1)];
+    EJOPCODE_RET: {
+        uint8_t idx = *(frame->pc + 1);
+        frame->pc = (uint8_t*)(uintptr_t)LOCAL_LOAD_INT(frame, idx);
         goto *opcode_labels[*frame->pc];
     }
 
-    //==================================
+    EJOPCODE_DUP: {
+        // DUP duplicates the top word on the stack (int, float, or reference)
+        if (frame->sp == 0) {
+            err = JERR_TYPECHECK_FAILURE;
+            goto exit;
+        }
+        int top_idx = frame->sp - 1;
+        int32_t value = frame->stack[top_idx];
+        int is_ref = SHADOW_GET_REF(frame->shadow_stack, top_idx);
+
+        if (is_ref) {
+            STACK_PUSH_REF(frame, (void*)(uintptr_t)value);
+        } else {
+            // For int or float, just copy the raw bits
+            STACK_PUSH_INT(frame, value);
+        }
+        NEXT();
+    }
 
 exit:
-    thread_kill(thread);
     return err;
 }

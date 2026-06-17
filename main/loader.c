@@ -10,8 +10,6 @@
 static char* system_prefixes[] = {"java/"};
 static BuiltinClassEntry_t* builtin_classes[] = {
     &java_lang_Object,
-    &dummy_class,
-    &i_class,
 };
 
 static char s_path[256 + sizeof(".class") + 1] = {0};
@@ -19,7 +17,7 @@ static char s_app_classpath[256] = {0};
 static memstream_t s_memstream = {0};
 
 static bool is_system_class(char* class_name){
-    return true;
+    //return true;
 
 
     for(unsigned i = 0; i < sizeof(system_prefixes) / sizeof(system_prefixes[0]); i++){
