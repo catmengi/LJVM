@@ -239,6 +239,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
                     case EJCT_FIELDREF:
                         symbol->type = PROXY_SYMBOL_FIELD;
                         break;
+                    case EJCT_INTERFACE_METHODREF:
                     case EJCT_METHODREF:
                         symbol->type = PROXY_SYMBOL_METHOD;
                         break;
@@ -324,6 +325,7 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
             case EJOPCODE_LDC2_W:
             case EJOPCODE_INVOKESPECIAL:
             case EJOPCODE_INVOKESTATIC:
+            case EJOPCODE_INVOKEVIRTUAL:
             case EJOPCODE_GETSTATIC:
             case EJOPCODE_GETFIELD:
             case EJOPCODE_PUTSTATIC:
@@ -334,11 +336,6 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
 
             case EJOPCODE_LDC:{
                 *((uint8_t*)(opcode + 1)) = find_patched_symbol_index(*(opcode + 1), &metadata->cp_patch_list);
-            }
-            break;
-
-            case EJOPCODE_INVOKEVIRTUAL:{
-                *((uint16_t*)(opcode + 1)) = cpu_to_be16(find_patched_symbol_index(be16_to_cpu(*(uint16_t*)(opcode + 1)), &metadata->cp_patch_list));
             }
             break;
         }
@@ -514,6 +511,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     FAIL_SET_JUMP(this_class, err, JERR_OOM, exit);
 
     this_class->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
+    this_class->flags.is_final = (parsed_class->flags & ACC_FINAL) == ACC_FINAL;
+    this_class->flags.is_abstract = (parsed_class->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
 
     ClassLinkTimeMetadata_t* metadata = bumper_calloc(&s_temporary_arena, 1, sizeof(*metadata));
     FAIL_SET_JUMP(metadata, err, JERR_OOM, exit);
@@ -582,6 +581,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         FAIL_SET_JUMP(mangled_name, err, JERR_OOM, exit);
         snprintf(mangled_name, mangled_len, "%s@%s", raw_field_name_cstr, raw_field_descriptor_cstr);
 
+        field->class = this_class;
         field->type = raw_field_descriptor_utf8->string[0];
         field->offset = offsets[is_static];
         field->flags.is_static = is_static;
@@ -650,10 +650,10 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->name_id = name_id;
         
         FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type)) == JERR_OK, err, err, exit);
-        method->args_slots += method->flags.is_virtual;
+        method->args_slots += !method->flags.is_static;
         method->args_bitmap_size = (method->args_slots + 31) / 32; //32 bits in uint32_t.......
         FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(&s_permament_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
-        FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, method->flags.is_virtual, method->args_bitmap)) == JERR_OK, err, err, exit); 
+        FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, !method->flags.is_static, method->args_bitmap)) == JERR_OK, err, err, exit); 
 
         if(method->flags.is_native){
             FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
@@ -849,6 +849,8 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     Class_t* parent = this_class->parent;
     ClassLinkTimeMetadata_t* metadata = this_class->metadata;
 
+    FAIL_SET_JUMP(!parent || !parent->flags.is_final, err, JERR_TYPECHECK_FAILURE, exit);
+
     //Fix field offsets
     this_class->object_size += parent ? parent->object_size : 0;
     for(unsigned i = 0; i < this_class->instance_fields.count; i++){
@@ -905,13 +907,16 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
         for(unsigned j = 0; j < interface->methods.count; j++){
             Method_t* imethod = &interface->methods.methods[j];
             if(imethod->flags.is_virtual){
-                FAIL_SET_JUMP((implementation->methods[iindex++] = class_find_vtable_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
+                FAIL_SET_JUMP((implementation->methods[iindex] = class_find_vtable_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
                 imethod->interface_index = iindex;
+                iindex++;
             }
         }
     }
 
     this_class->metadata = NULL;
+    Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
+    FAIL_SET_JUMP(!clinit || (err = java_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
 
 exit:
     return 0;
@@ -947,4 +952,21 @@ exit:
     if(--deepness == 0)
         bumper_reset(&s_temporary_arena);
     return err;
+}
+
+bool class_is_compatible(Class_t* class, Class_t* compatible_to){
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        if(compatible_to == cur)
+            return true;
+
+        for(unsigned i = 0; i < cur->implements.count; i++){
+            if(cur->implements.implementations[i].interface == class || cur->implements.implementations[i].interface == cur) {
+                continue;
+            }
+            
+            if(class_is_compatible(cur->implements.implementations[i].interface, compatible_to))
+                return true;
+        }
+    }
+    return false;
 }

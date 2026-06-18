@@ -20,3 +20,5 @@ typedef struct{
 //(int32_t fields[class->fields_count[1]] || ArrayObject_t header)
 //==========================================
 //int(32/64)_t element[array->count];
+
+Error_t object_class_alloc(Class_t* class, int32_t* output);

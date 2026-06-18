@@ -10,7 +10,7 @@ static NativeMethodReturnValue_t debug_native(Thread_t* thread,Method_t* self, i
 }
 
 static NativeMethodReturnValue_t debug_print(Thread_t* thread, Method_t* self, int32_t* params){
-    printf("debug: %ld\n", params[0]);
+    printf("debug: %d\n", params[0]);
     return (NativeMethodReturnValue_t){.err = JERR_OK, .value = {0}};
 }
 

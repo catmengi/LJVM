@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "list.h"
 #include "jerror.h"
 
@@ -66,6 +67,8 @@ typedef struct{
     uint16_t name_id;
     JavaValueType_t type; //Still store type separately for faster opcodes on resolved fields
     size_t offset; //offset is in uint32_t words!
+    
+    Class_t* class;
     //uint8_t size; //size is in uint32_t words!
 
     struct{
@@ -204,6 +207,8 @@ typedef struct Class_t{
                 unsigned is_linked:1;
                 unsigned is_array:1;
                 unsigned is_interface:1;
+                unsigned is_final:1;
+                unsigned is_abstract:1; //set 1 if <clinit> was runned!
                 //TODO: other flags
             };
         };
@@ -242,3 +247,4 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol);
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
+bool class_is_compatible(Class_t* class, Class_t* compatible_to);

@@ -321,6 +321,53 @@ exit:
     _conv.d; \
 })
 
+#define STACK_PUSH_GENERIC(frame, type, value)\
+({switch(type){\
+        case TYPE_INT:\
+        case TYPE_CHAR:\
+        case TYPE_SHORT:\
+        case TYPE_BOOL:\
+        case TYPE_BYTE:\
+            STACK_PUSH_INT(frame, *(int32_t*)value);\
+            break;\
+        case TYPE_REFERENCE:\
+            STACK_PUSH_REF(frame, *(int32_t*)value);\
+            break;\
+        case TYPE_FLOAT:\
+            STACK_PUSH_FLOAT(frame, *(float*)value);\
+            break;    \
+        case TYPE_DOUBLE:\
+            STACK_PUSH_DOUBLE(frame, *(double*)value);\
+            break;        \
+        case TYPE_LONG:\
+            STACK_PUSH_LONG(frame, *(int64_t*)value);\
+            break;\
+        default: break;\
+}})
+
+#define STACK_POP_GENERIC(frame, type, value)({    \
+    switch(type){\
+        case TYPE_INT:\
+        case TYPE_BOOL:\
+        case TYPE_BYTE:\
+        case TYPE_SHORT:\
+        case TYPE_CHAR:\
+            *(int32_t*)value = STACK_POP_INT(frame);\
+            break;\
+        case TYPE_REFERENCE:\
+            *(void**)value = STACK_POP_REF(frame);\
+            break;\
+        case TYPE_FLOAT:\
+            *(float*)value = STACK_POP_FLOAT(frame);\
+            break;\
+        case TYPE_LONG:\
+            *(int64_t*)value = STACK_POP_LONG(frame);\
+            break;\
+        case TYPE_DOUBLE:\
+            *(double*)value = STACK_POP_DOUBLE(frame);\
+            break;\
+        default: break;\
+}})
 
 static Error_t native_method_invoke(Thread_t* thread, CallFrame_t* frame, Method_t* method){
     Error_t err = JERR_OK;
@@ -333,33 +380,7 @@ static Error_t native_method_invoke(Thread_t* thread, CallFrame_t* frame, Method
     NativeMethodReturnValue_t retval = native(thread,method,args);
     FAIL_SET_JUMP(retval.err == JERR_OK, err, retval.err, exit);
 
-    switch(method->return_type){
-        case TYPE_INT:
-        case TYPE_CHAR:
-        case TYPE_SHORT:
-        case TYPE_BOOL:
-        case TYPE_BYTE:
-            STACK_PUSH_INT(frame, *(int32_t*)retval.value);
-            break;
-
-        case TYPE_REFERENCE:
-            STACK_PUSH_REF(frame, *(int32_t*)retval.value);
-            break;
-
-        case TYPE_FLOAT:
-            STACK_PUSH_FLOAT(frame, *(float*)retval.value);
-            break;    
-        
-        case TYPE_DOUBLE:
-            STACK_PUSH_DOUBLE(frame, *(double*)retval.value);
-            break;        
-
-        case TYPE_LONG:
-            STACK_PUSH_LONG(frame, *(int64_t*)retval.value);
-            break;
-
-        default: break;
-    }
+    STACK_PUSH_GENERIC(frame, method->return_type, retval.value);
 
 exit:
     if(err == JERR_EXCEPTION){
@@ -380,6 +401,8 @@ Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_va
     Error_t err = JERR_OK;
     Thread_t thread = {0};
     
+    FAIL_SET_JUMP(method && (arguments || method->args_slots == 0) && (return_value || method->return_type == TYPE_VOID), err, JERR_BADPARAM, exit);
+
     INIT_LIST_HEAD(&thread.list);
     INIT_LIST_HEAD(&thread.joiners);
 
@@ -401,34 +424,7 @@ Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_va
 
         FAIL_SET_JUMP((err = interpret_bytecode(&thread)) == JERR_OK, err, err, exit);
     }
-    
-    switch(method->return_type){
-        case TYPE_INT:
-        case TYPE_BOOL:
-        case TYPE_BYTE:
-        case TYPE_SHORT:
-        case TYPE_CHAR:
-            *(int32_t*)return_value = STACK_POP_INT(retstub);
-            break;
-
-        case TYPE_REFERENCE:
-            *(void**)return_value = STACK_POP_REF(retstub);
-            break;
-
-        case TYPE_FLOAT:
-            *(float*)return_value = STACK_POP_FLOAT(retstub);
-            break;
-
-        case TYPE_LONG:
-            *(int64_t*)return_value = STACK_POP_LONG(retstub);
-            break;
-
-        case TYPE_DOUBLE:
-            *(double*)return_value = STACK_POP_DOUBLE(retstub);
-            break;
-
-        default: break;
-    }
+    STACK_POP_GENERIC(retstub, method->return_type, return_value);
 
 exit:
     return err;
@@ -438,6 +434,15 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     Error_t err = JERR_OK;
     size_t opcodes_executed = 0;
     CallFrame_t* frame = thread_frame_get(thread);
+
+    static const JavaValueType_t sym_to_value_type[] = {
+        [SYMBOL_INT] = TYPE_INT,
+        [SYMBOL_FLOAT] = TYPE_FLOAT,
+        [SYMBOL_LONG] = TYPE_LONG,
+        [SYMBOL_DOUBLE] = TYPE_LONG,
+        [SYMBOL_STRING] = TYPE_REFERENCE,
+        [SYMBOL_CLASS] = TYPE_REFERENCE,
+    };
 
     void* opcode_labels[256] = {
         // Loads (explicit per type)
@@ -489,6 +494,8 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         [EJOPCODE_PUTSTATIC]  = &&EJOPCODE_PUTSTATIC,
         [EJOPCODE_GETSTATIC]  = &&EJOPCODE_GETSTATIC,
+        [EJOPCODE_PUTFIELD] = &&EJOPCODE_PUTFIELD,
+        [EJOPCODE_GETFIELD] = &&EJOPCODE_GETFIELD,
 
         [EJOPCODE_BIPUSH]     = &&EJOPCODE_BIPUSH,
         [EJOPCODE_SIPUSH]     = &&EJOPCODE_SIPUSH,
@@ -538,8 +545,14 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         [EJOPCODE_RET]        = &&EJOPCODE_RET,
 
         [EJOPCODE_INVOKESTATIC]  = &&EJOPCODE_INVOKESTATIC,
+        [EJOPCODE_INVOKEVIRTUAL] = &&EJOPCODE_INVOKEVIRTUAL,
         [EJOPCODE_INVOKESPECIAL] = &&EJOPCODE_INVOKESPECIAL,
-        [EJOPCODE_DUP]           = &&EJOPCODE_DUP,
+        [EJOPCODE_INVOKEINTERFACE] = &&EJOPCODE_INVOKEINTERFACE,
+        [EJOPCODE_DUP] = &&EJOPCODE_DUP,
+        [EJOPCODE_NEW] = &&EJOPCODE_NEW,
+        [EJOPCODE_LDC] = &&EJOPCODE_LDC,
+        [EJOPCODE_LDC2_W] = &&EJOPCODE_LDC2_W,
+        [EJOPCODE_LDC_W] = &&EJOPCODE_LDC_W,
     };
 
     // Helper to advance PC and jump to next opcode
@@ -687,7 +700,7 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         NEXT();
 
     EJOPCODE_SIPUSH:
-        STACK_PUSH_INT(frame, (int32_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)));
+        STACK_PUSH_INT(frame, (int32_t)(int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)));
         NEXT();
 
     // ========== RETURNS ==========
@@ -743,37 +756,9 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
-        void* mem = (int32_t*)frame->method->class->static_fields_storage + field->offset;
-
         field->constantvalue = NULL;
-
-        switch(field->type){
-            case TYPE_BOOL:
-            case TYPE_BYTE:
-            case TYPE_CHAR:
-            case TYPE_SHORT:
-            case TYPE_INT:
-                *(int32_t*)mem = STACK_POP_INT(frame);
-                break;
-
-            case TYPE_REFERENCE:
-                *(void**)mem = STACK_POP_REF(frame);
-                break;
-
-            case TYPE_FLOAT:
-                *(float*)mem = STACK_POP_FLOAT(frame);
-                break;
-
-            case TYPE_DOUBLE:
-                *(double*)mem = STACK_POP_DOUBLE(frame);
-                break;
-
-            case TYPE_LONG:
-                *(int64_t*)mem = STACK_POP_LONG(frame);
-                break;
-
-            default: break;
-        }
+        
+        STACK_POP_GENERIC(frame, field->type, &frame->method->class->static_fields_storage[field->offset]);
         NEXT();
     }
 
@@ -783,42 +768,51 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
-        void* mem = (int32_t*)frame->method->class->static_fields_storage + field->offset;
+        void* value = &frame->method->class->static_fields_storage[field->offset];
 
         if (field->constantvalue) {
             FAIL_SET_JUMP((err = class_resolv_symbol(field->constantvalue)) == JERR_OK, err, err, exit);
-            memcpy(mem, (field->constantvalue->type == SYMBOL_STRING) ? &field->constantvalue->value : field->constantvalue->value,
+            memcpy(value, (field->constantvalue->type == SYMBOL_STRING) ? &field->constantvalue->value : field->constantvalue->value,
                    ((field->type == TYPE_LONG || field->type == TYPE_DOUBLE) ? 2 : 1) * sizeof(int32_t));
             field->constantvalue = NULL;
         }
 
-        switch(field->type){
-            case TYPE_REFERENCE:
-                STACK_PUSH_REF(frame, *(int32_t*)mem);
-                break;
-            
-            case TYPE_FLOAT:
-                STACK_PUSH_FLOAT(frame, *(float*)mem);
-                break;
+        STACK_PUSH_GENERIC(frame, field->type, value);
+        NEXT();
+    }
+    
+    EJOPCODE_GETFIELD:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
-            case TYPE_SHORT:
-            case TYPE_BYTE:
-            case TYPE_CHAR:
-            case TYPE_BOOL:
-            case TYPE_INT:
-                STACK_PUSH_INT(frame, *(int32_t*)mem);
-                break;
+        Field_t* field = sym->value;
+        Object_t* object = STACK_POP_REF(frame);
 
-            case TYPE_DOUBLE:
-                STACK_PUSH_DOUBLE(frame, *(double*)mem);
-                break;
+        FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
 
-            case TYPE_LONG:
-                STACK_PUSH_LONG(frame, *(int64_t*)mem);
-                break;
+        int32_t* fields_storage = (int32_t*)(((char*)object) + sizeof(*object));
+        STACK_PUSH_GENERIC(frame, field->type, &fields_storage[field->offset]);
 
-            default: break;
-        }
+        NEXT();
+    }
+
+    EJOPCODE_PUTFIELD:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
+
+        Field_t* field = sym->value;
+        int64_t value = 0;
+
+        STACK_POP_GENERIC(frame, field->type, &value);
+        Object_t* object = STACK_POP_REF(frame);
+
+        FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
+
+        int32_t* fields_storage = (int32_t*)(((char*)object) + sizeof(*object));
+        memcpy(&fields_storage[field->offset], &value, class_field_sizeof(field->type) * sizeof(int32_t));
+
         NEXT();
     }
 
@@ -830,6 +824,77 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* method = sym->value;
+
+        if (!method->flags.is_native) {
+            CallFrame_t* new_frame = thread_frame_push(thread, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+
+            int32_t* args = &frame->stack[frame->sp -= method->args_slots];
+            FAIL_SET_JUMP(interpreter_check_arguments(method, frame->shadow_stack, frame->sp), err, JERR_TYPECHECK_FAILURE, exit);
+
+            memcpy(new_frame->shadow_locals, method->args_bitmap, method->args_bitmap_size);
+            memcpy(new_frame->locals, args, method->args_slots * sizeof(int32_t));
+
+            frame = new_frame;
+            goto *opcode_labels[*frame->pc];
+        } else {
+            FAIL_SET_JUMP((err = native_method_invoke(thread, frame, method)) == JERR_OK, err, err, exit);
+            NEXT();
+        }
+    }
+
+    EJOPCODE_INVOKEVIRTUAL:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
+
+        Method_t* template = sym->value;
+        Object_t* object = (Object_t*)frame->stack[frame->sp - template->args_slots];
+        Class_t* object_class = object->class;
+        FAIL_SET_JUMP(template->flags.is_virtual, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(template->vtable_index < object_class->vtable_size, err, JERR_TYPECHECK_FAILURE, exit);
+
+        Method_t* method = object_class->vtable[template->vtable_index];
+
+        if (!method->flags.is_native) {
+            CallFrame_t* new_frame = thread_frame_push(thread, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+
+            int32_t* args = &frame->stack[frame->sp -= method->args_slots];
+            FAIL_SET_JUMP(interpreter_check_arguments(method, frame->shadow_stack, frame->sp), err, JERR_TYPECHECK_FAILURE, exit);
+
+            memcpy(new_frame->shadow_locals, method->args_bitmap, method->args_bitmap_size);
+            memcpy(new_frame->locals, args, method->args_slots * sizeof(int32_t));
+
+            frame = new_frame;
+            goto *opcode_labels[*frame->pc];
+        } else {
+            FAIL_SET_JUMP((err = native_method_invoke(thread, frame, method)) == JERR_OK, err, err, exit);
+            NEXT();
+        }
+    }
+
+    EJOPCODE_INVOKEINTERFACE:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
+
+        Method_t* template = sym->value;
+        Object_t* object = (Object_t*)frame->stack[frame->sp - template->args_slots];
+        Class_t* object_class = object->class;
+        FAIL_SET_JUMP(!template->flags.is_static, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
+
+        Method_t* method = NULL;
+        for(unsigned i = 0; i < object_class->implements.count; i++){
+            Implementation_t* implementation = &object_class->implements.implementations[i];
+            if(implementation->interface->name_id == template->class->name_id){
+                FAIL_SET_JUMP(implementation->methods_count > template->interface_index, err, JERR_TYPECHECK_FAILURE, exit);
+                method = implementation->methods[template->interface_index];
+            }
+        }
+        FAIL_SET_JUMP(method, err, JERR_NOTFOUND, exit);
 
         if (!method->flags.is_native) {
             CallFrame_t* new_frame = thread_frame_push(thread, method);
@@ -970,6 +1035,61 @@ static Error_t interpret_bytecode(Thread_t* thread) {
             // For int or float, just copy the raw bits
             STACK_PUSH_INT(frame, value);
         }
+        NEXT();
+    }
+
+    EJOPCODE_LDC:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint8_t*)(frame->pc + 1)];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+
+        switch(sym->type){
+            default:
+                err = JERR_BADPARAM;
+                goto exit;
+
+            case SYMBOL_INT:
+            case SYMBOL_FLOAT:
+            case SYMBOL_LONG:
+            case SYMBOL_DOUBLE:
+            case SYMBOL_STRING:
+                STACK_PUSH_GENERIC(frame, sym_to_value_type[sym->type], sym->value);
+                break;
+        }
+
+        NEXT();
+    }
+
+    EJOPCODE_LDC2_W:
+    EJOPCODE_LDC_W:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+
+        switch(sym->type){
+            default:
+                err = JERR_BADPARAM;
+                goto exit;
+
+            case SYMBOL_INT:
+            case SYMBOL_FLOAT:
+            case SYMBOL_LONG:
+            case SYMBOL_DOUBLE:
+            case SYMBOL_STRING:
+                STACK_PUSH_GENERIC(frame, sym_to_value_type[sym->type], sym->value);
+                break;
+        }
+
+        NEXT();
+    }
+
+    EJOPCODE_NEW:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
+
+        int32_t object = 0;
+        FAIL_SET_JUMP((err = object_class_alloc(sym->value, &object)) == JERR_OK, err, err, exit); 
+
+        STACK_PUSH_REF(frame, object);
         NEXT();
     }
 
