@@ -191,7 +191,8 @@ typedef struct{
 
 typedef struct Class_t{
     //Linker info
-    struct list_head list; //Required for link-time hierarchy building
+    struct list_head hierarchy_list; //Required for link-time hierarchy building
+    struct list_head list;
     void* metadata;
 
     //Class info
@@ -220,7 +221,7 @@ typedef struct Class_t{
     FieldTable_t static_fields;
 
     size_t object_size; //Parent sizes + self size. Size in uint32_t words
-    int32_t* static_fields_storage;
+    int32_t* storage; //Static fields storage
 
     //Method info
     //TODO: methods structure

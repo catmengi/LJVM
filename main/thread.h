@@ -3,7 +3,7 @@
 #include "bumper.h"
 #include "class.h"
 #include "config.h"
-#include "object.h"
+#include "list.h"
 
 #include <stdint.h>
 
@@ -35,6 +35,7 @@ typedef enum{
 
 typedef struct{
     struct list_head list;
+    struct list_head gc_list;
     struct list_head joiners; //List of threads that want to join us
 
     ThreadState_t state;
@@ -48,10 +49,11 @@ typedef struct{
 }Thread_t;
 
 void threads_init();
-Error_t thread_schedule();
 
+Error_t thread_schedule();
 Thread_t* thread_alloc();
-void thread_start(Thread_t* thread, Object_t* this, Method_t* method);
+
+void thread_start(Thread_t* thread, Method_t* method, int32_t* args);
 void thread_kill(Thread_t* thread);
 
 Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_value);

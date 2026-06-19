@@ -1,4 +1,6 @@
 #include "native_methods_service.h"
+#include "heap.h"
+#include "thread.h"
 
 #include <string.h>
 
@@ -14,7 +16,14 @@ static NativeMethodReturnValue_t debug_print(Thread_t* thread, Method_t* self, i
     return (NativeMethodReturnValue_t){.err = JERR_OK, .value = {0}};
 }
 
-static NativeMethodEntry_t* s_native_methods[] = {&(NativeMethodEntry_t){"debug_native@(I)I", "dummy", debug_native}, &(NativeMethodEntry_t){"debug_print@(I)V", "dummy", debug_print}};
+static NativeMethodReturnValue_t debug_gc(Thread_t* thread, Method_t* self, int32_t* args){
+    heap_gc_start();
+    return (NativeMethodReturnValue_t){.err = JERR_OK};
+}
+
+static NativeMethodEntry_t* s_native_methods[] = {&(NativeMethodEntry_t){"debug_native@(I)I", "dummy", debug_native},
+                                                  &(NativeMethodEntry_t){"debug_print@(I)V", "dummy", debug_print},
+                                                  &(NativeMethodEntry_t){"debug_gc@()V", "dummy", debug_gc}};
 
 
 //Requires name in mangled form!

@@ -9,6 +9,7 @@ int bumper_create(bump_allocator_t* arena, size_t size){
 
     arena->last_end = arena->memory = arena_memory;
     arena->size = size;
+    memset(arena->memory, 0, arena->size);
 
     return 0;
 }
@@ -47,6 +48,10 @@ void bumper_unwind(bump_allocator_t* arena, size_t size){
 
 size_t bumper_size(bump_allocator_t* arena){
     return arena->size;
+}
+
+size_t bumper_used(bump_allocator_t* arena){
+    return arena->last_end - arena->memory;
 }
 
 void* bumper_arena_end(bump_allocator_t* arena){

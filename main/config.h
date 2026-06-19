@@ -13,7 +13,6 @@
 #define THREAD_LOWEST_QUOTA 64
 #define THREAD_DEFAULT_PRIORITY 5
 
-#define OBJECTS_MAX 32768
 #define OBJECT_HEAP_SIZE 2 MB
 
 void JEspresso_init();

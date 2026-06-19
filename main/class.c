@@ -16,12 +16,14 @@
 
 static bump_allocator_t s_permament_arena = {0}, s_temporary_arena = {0};
 static ClassTable_t s_class_table = {0};
+static struct list_head s_class_list = {0};
 static bool s_initialised = false; //Reinit protection (VM reset in firmwares)
 
 #define JVM_CLASSPATH "java_src"
 
 void classes_init(){
-    
+    INIT_LIST_HEAD(&s_class_list);
+
     if(!s_initialised){
         assert(bumper_create(&s_permament_arena, CLASS_PERMAMENT_ARENA) == 0);
         assert(bumper_create(&s_temporary_arena, CLASS_TEMPOPARY_ARENA) == 0);
@@ -90,10 +92,16 @@ Error_t class_insert(Class_t* class){
 
     FAIL_SET_JUMP(!index.flags.is_error, err, JERR_OOM, exit);
 
+    INIT_LIST_HEAD(&class->list);
+    list_add(&class->list, &s_class_list);
     s_class_table.classes[index.index] = class;
 
 exit:
     return err;
+}
+
+extern struct list_head* classes_get_all(){
+    return &s_class_list;
 }
 
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out);
@@ -115,7 +123,8 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         Class_t* array_class = bumper_calloc(&s_permament_arena, 1, sizeof(*array_class));
         FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
 
-        INIT_LIST_HEAD(&array_class->list);
+        INIT_LIST_HEAD(&array_class->hierarchy_list);
+        
         array_class->name_id = name_id;
         array_class->parent = jlObject;
         array_class->vtable = jlObject->vtable;
@@ -534,7 +543,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     }
 
 
-    INIT_LIST_HEAD(&this_class->list);
+    INIT_LIST_HEAD(&this_class->hierarchy_list);
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
     this_class->implements.count = metadata->implements_count;
@@ -604,8 +613,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
             }
         }
     }
-    this_class->static_fields_storage = bumper_calloc(&s_permament_arena, offsets[1], sizeof(int32_t));
-    FAIL_SET_JUMP(this_class->static_fields_storage, err, JERR_OOM, exit);
+    this_class->storage = bumper_calloc(&s_permament_arena, offsets[1], sizeof(int32_t));
+    FAIL_SET_JUMP(this_class->storage, err, JERR_OOM, exit);
 
     this_class->object_size = offsets[0]; //Will will use this also on linker stage to calculate proper offsets
 
@@ -931,7 +940,7 @@ static Error_t class_link(Class_t* class){
 
     Class_t* cur_class = class;
     while(cur_class){
-        list_add(&cur_class->list, &hierarchy_list);
+        list_add(&cur_class->hierarchy_list, &hierarchy_list);
         if(cur_class->flags.is_linked) break;
 
         ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
@@ -943,7 +952,7 @@ static Error_t class_link(Class_t* class){
     }
 
     Class_t* linking_class = NULL;
-    list_for_each_entry(linking_class, &hierarchy_list, list){
+    list_for_each_entry(linking_class, &hierarchy_list, hierarchy_list){
         if(!linking_class->flags.is_linked)
             FAIL_SET_JUMP((err = class_fix_hierarchy(linking_class)) == JERR_OK, err, err, exit);
     }

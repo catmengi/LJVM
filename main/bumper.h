@@ -25,5 +25,6 @@ char* bumper_strdup(bump_allocator_t* arena, const char* str);
 void bumper_unwind(bump_allocator_t* arena, size_t size); //Pushes last_end pointer back by size
 
 size_t bumper_size(bump_allocator_t* arena);
+size_t bumper_used(bump_allocator_t* arena);
 void* bumper_arena_end(bump_allocator_t* arena);
 void* bumper_arena_start(bump_allocator_t* arena);
