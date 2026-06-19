@@ -8,5 +8,6 @@ DONE:
 5. GC + Object system (No array support, might contain serious bugs)
 
 TO BE DONE: 
+
 0. CLDC support + stub library for low-level VM stuff
 1. Locking system (monitors)
