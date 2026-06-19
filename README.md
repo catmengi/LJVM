@@ -2,13 +2,11 @@ Current state is very WIP.
 
 DONE:
 1. Loader
-2. Linker half-done
+2. Linker
+3. Interpreter
+4. Cooperative threading (Might containt regressions)
+5. GC + Object system (No array support, might contain serious bugs)
 
 TO BE DONE: 
-
-0. Java VM
-2. Temporary object system (malloc()-based)
-3. Relocatable handle based GC (half conservative (stack and locals conservative, object and classes precise))
-4. Thread system
-5. Locking system (monitors)
-6. CLDC support
+0. CLDC support + stub library for low-level VM stuff
+1. Locking system (monitors)
