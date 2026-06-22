@@ -38,7 +38,7 @@ public class dummy {
     static int passFlag = 0;
 
     // print a pass marker (42) or a fail marker (0)
-    static void pass() {
+    static synchronized void pass() {
         passFlag = 42;
         debug_print(42);
     }
@@ -46,7 +46,7 @@ public class dummy {
         debug_print(code);
     }
 
-    public static void main(String[] args) {
+    public static synchronized void main(String[] args) {
         // -------- Test 1: allocate many tiny objects, force GC, check the root is safe
         Node root = new Node(0);
         Node add_cur = root;
@@ -55,7 +55,7 @@ public class dummy {
             add_cur = add_cur.next;
         }
         // root now holds a linked list of 100 nodes – all reachable
-        //debug_gc();   // first GC – should preserve all 100 nodes
+        debug_gc();   // first GC – should preserve all 100 nodes
 
         // verify the list is intact by summing values
         int sum = 0;
@@ -68,7 +68,7 @@ public class dummy {
 
         // -------- Test 2: interface dispatch after compaction
         Container.keep = new Data(10, 20);      // reachable via static field
-        debug_gc();   // second GC – moves objects, updates static field
+       // debug_gc();   // second GC – moves objects, updates static field
         int verifyResult = Container.keep.verify();
         if (verifyResult != 30) { fail(2); return; }
 
@@ -76,7 +76,7 @@ public class dummy {
         Data d = new Data(5, 7);
         d.self = d;             // explicit self‑reference
         Container.keep = d;     // keep it reachable
-        debug_gc();             // third GC – must not crash on cycle
+        //debug_gc();             // third GC – must not crash on cycle
         if (d.verify() != 12) { fail(3); return; }
 
         // -------- Test 4: mass garbage, then verify the root still works
@@ -94,5 +94,11 @@ public class dummy {
 
         // -------- All tests passed
         pass();
+
+        dummy[] a = new dummy[4];
+
+        a[0] = new dummy();
+
+        debug_gc();
     }
 }

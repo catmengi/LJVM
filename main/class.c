@@ -9,6 +9,7 @@
 #include "stringpool.h"
 #include "native_methods_service.h"
 #include "thread.h"
+#include "heap.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -106,6 +107,19 @@ extern struct list_head* classes_get_all(){
 
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out);
 static Error_t class_link(Class_t* class);
+static JavaValueType_t array_class_type(char* name){
+    if(strlen(name) > 1) return TYPE_REFERENCE;
+    
+    JavaValueType_t types[] = {TYPE_BOOL, TYPE_BYTE, TYPE_CHAR, TYPE_SHORT, TYPE_INT,
+                               TYPE_FLOAT, TYPE_LONG, TYPE_DOUBLE, TYPE_REFERENCE, TYPE_VOID};
+
+    for(unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++){
+        if(name[0] == types[i]) return types[i];
+    }
+
+    return TYPE_REFERENCE;
+}
+
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     Error_t err = JERR_OK;
     assert(out);
@@ -113,6 +127,7 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     if((*out = class_find(name_id))) return JERR_OK;
 
     char* string_name = stringpool_get(name_id);
+    FAIL_SET_JUMP(string_name, err, JERR_BADPARAM, exit); //What the fuck did you just passed here?
     if(string_name[0] == '['){
         Class_t* jlObject = NULL;
         int jlname_id = stringpool_add("java/lang/Object");
@@ -126,10 +141,18 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         INIT_LIST_HEAD(&array_class->hierarchy_list);
         
         array_class->name_id = name_id;
+
+        array_class->array_type = array_class_type(strrchr(string_name, '[') + 1);
+        FAIL_SET_JUMP(array_class->array_type != TYPE_VOID, err, JERR_TYPECHECK_FAILURE, exit); //WHYYYYYYY?
+
         array_class->parent = jlObject;
         array_class->vtable = jlObject->vtable;
         array_class->vtable_size = jlObject->vtable_size;
         array_class->object_size = jlObject->object_size;
+
+        Class_t* jlClass = NULL;
+        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &array_class->class_object)) == JERR_OK, err, err, exit);
 
         array_class->flags.is_linked = 1;
         array_class->flags.is_array = 1;
@@ -143,10 +166,6 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
 
 exit:
     return err;
-}
-
-unsigned class_field_sizeof(JavaValueType_t type){
-    return type == TYPE_VOID ? 0 : type == TYPE_LONG || type == TYPE_DOUBLE ? 2 : 1;
 }
 
 static int find_patched_symbol_index(unsigned cp_index, struct list_head* patch_list){
@@ -328,6 +347,7 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
             case EJOPCODE_INVOKEINTERFACE:
             case EJOPCODE_INSTANCEOF:
             case EJOPCODE_CHECKCAST:
+            case EJOPCODE_ANEWARRAY:
             case EJOPCODE_MULTIANEWARRAY:
             case EJOPCODE_NEW:
             case EJOPCODE_LDC_W:
@@ -398,7 +418,7 @@ static Error_t parse_method_descriptor(const char* descriptor, JavaValueType_t* 
             descriptor++;
         }
         
-        *arguments_size += class_field_sizeof(type);
+        *arguments_size += type == TYPE_LONG || type == TYPE_DOUBLE ? 2 : 1;
     }
     
     if(*descriptor != ')'){
@@ -519,6 +539,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     Class_t* this_class = bumper_calloc(&s_permament_arena, 1, sizeof(*this_class));
     FAIL_SET_JUMP(this_class, err, JERR_OOM, exit);
 
+    this_class->array_type = TYPE_VOID;
     this_class->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
     this_class->flags.is_final = (parsed_class->flags & ACC_FINAL) == ACC_FINAL;
     this_class->flags.is_abstract = (parsed_class->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
@@ -594,7 +615,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         field->type = raw_field_descriptor_utf8->string[0];
         field->offset = offsets[is_static];
         field->flags.is_static = is_static;
-        offsets[is_static] += class_field_sizeof(field->type);
+        field->size = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
+        offsets[is_static] += field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? 2 : 1;
 
         int name_id = stringpool_add(mangled_name);
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
@@ -616,7 +638,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->storage = bumper_calloc(&s_permament_arena, offsets[1], sizeof(int32_t));
     FAIL_SET_JUMP(this_class->storage, err, JERR_OOM, exit);
 
-    this_class->object_size = offsets[0]; //Will will use this also on linker stage to calculate proper offsets
+    this_class->object_size = offsets[0] * sizeof(int32_t); //Will will use this also on linker stage to calculate proper offsets
 
     this_class->methods.count = parsed_class->methods_count;
     this_class->methods.methods = bumper_calloc(&s_permament_arena, this_class->methods.count, sizeof(*this_class->methods.methods));
@@ -631,6 +653,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
         method->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
+        method->flags.is_syncronized = (raw_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED;
 
         method->flags.is_static = is_static;
         method->flags.is_virtual = !(is_static || is_special);
@@ -862,9 +885,9 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
 
     //Fix field offsets
     this_class->object_size += parent ? parent->object_size : 0;
+    size_t field_offset_fixup = parent ? (parent->object_size / sizeof(int32_t)) : 0;
     for(unsigned i = 0; i < this_class->instance_fields.count; i++){
-        Field_t* field = &this_class->instance_fields.fields[i];
-        field->offset += parent ? parent->object_size : 0;
+        this_class->instance_fields.fields[i].offset += field_offset_fixup;
     }
 
     //Generate vtable
@@ -924,8 +947,13 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     }
 
     this_class->metadata = NULL;
+
     Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
     FAIL_SET_JUMP(!clinit || (err = java_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
+
+    Class_t* jlClass = NULL;
+    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
 
 exit:
     return 0;
@@ -940,6 +968,7 @@ static Error_t class_link(Class_t* class){
 
     Class_t* cur_class = class;
     while(cur_class){
+        INIT_LIST_HEAD(&cur_class->hierarchy_list);
         list_add(&cur_class->hierarchy_list, &hierarchy_list);
         if(cur_class->flags.is_linked) break;
 
@@ -969,10 +998,6 @@ bool class_is_compatible(Class_t* class, Class_t* compatible_to){
             return true;
 
         for(unsigned i = 0; i < cur->implements.count; i++){
-            if(cur->implements.implementations[i].interface == class || cur->implements.implementations[i].interface == cur) {
-                continue;
-            }
-            
             if(class_is_compatible(cur->implements.implementations[i].interface, compatible_to))
                 return true;
         }

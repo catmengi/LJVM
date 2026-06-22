@@ -5,13 +5,29 @@
 #include "jerror.h"
 #include "list.h"
 #include "thread.h"
+#include "monitor.h"
 
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
+
 
 static struct list_head s_gc_thread_list;
 static bump_allocator_t s_gc_heap = {0};
 static bool is_initialised = false;
+static int value_type_size[] = {
+    [TYPE_VOID] = 0,
+    [TYPE_BYTE] = sizeof(int8_t),
+    [TYPE_BOOL] = sizeof(bool),
+    [TYPE_CHAR] = sizeof(int16_t), //Java....
+    [TYPE_SHORT] = sizeof(int16_t),
+    [TYPE_INT] = sizeof(int32_t),
+    [TYPE_FLOAT] = sizeof(float),
+    [TYPE_LONG] = sizeof(int64_t),
+    [TYPE_DOUBLE] = sizeof(double),
+    [TYPE_REFERENCE] = sizeof(Object_t*),
+};
+
 
 void heap_init(){
     INIT_LIST_HEAD(&s_gc_thread_list);
@@ -22,27 +38,44 @@ void heap_init(){
     } else bumper_reset(&s_gc_heap);
 }
 
-Error_t heap_class_object_alloc(Class_t* class, int32_t* output){
+Error_t heap_class_object_alloc(Class_t* class, Object_t** output){
     Error_t err = JERR_OK;
 
     FAIL_SET_JUMP(class->flags.is_abstract == 0 && class->flags.is_interface == 0, err, JERR_TYPECHECK_FAILURE, exit);
     FAIL_SET_JUMP(class->flags.is_array == 0, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
 
-    if((sizeof(Object_t) + (class->object_size * sizeof(int32_t))) > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))){
-        heap_gc_start();
-    }
+    if(sizeof(Object_t) + class->object_size > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))) heap_gc_start();
 
     Object_t* object = NULL;
-    FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object))), err, JERR_OOM, exit);
-    FAIL_SET_JUMP(bumper_calloc(&s_gc_heap, class->object_size, sizeof(int32_t)), err, JERR_UNKNOWN, exit); //Looks wrong, but works properly because this is the simple bumper allocator + no real concurency
+    FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + class->object_size)), err, JERR_OOM, exit);
 
+    INIT_LIST_HEAD(&object->list);
     object->class = class;
     object->forward = 0;
+
+    *output = object;
+
+exit:
+    return err;
+}
+
+Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** output){
+    Error_t err = JERR_OK;
+
+    FAIL_SET_JUMP(class->flags.is_array == 1, err, JERR_BADPARAM, exit);
+    FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
+    FAIL_SET_JUMP(length >= 0, err, JERR_BADPARAM, exit);
+
+    Object_t* object = NULL;
+    FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + sizeof(int32_t) + (value_type_size[class->array_type] * length))), err, JERR_OOM, exit);
+
     INIT_LIST_HEAD(&object->list);
+    object->class = class;
+    object->forward = 0;
 
-    *output = (int32_t)object;
-
+    *(int32_t*)(((char*)object) + sizeof(*object)) = length;
+    *output = object;
 exit:
     return err;
 }
@@ -54,13 +87,23 @@ Error_t heap_class_object_get_fields(Object_t* object, int32_t** output){
     return JERR_OK;
 }
 
-Error_t heap_array_object_alloc(Class_t* class, int32_t count, int32_t* output){
-    assert(0 && "Unimplemented");
-
+Error_t heap_array_object_get_length(Object_t* object, int32_t* output){
     Error_t err = JERR_OK;
-    FAIL_SET_JUMP(class->flags.is_array == 1, err, JERR_BADPARAM, exit);
+    FAIL_SET_JUMP(object && object->class->flags.is_array == 1, err, JERR_TYPECHECK_FAILURE, exit);
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
-    FAIL_SET_JUMP(count >= 0, err, JERR_BADPARAM, exit);
+
+    *output = *(int32_t*)(((char*)object) + sizeof(*object));
+
+exit:
+    return err;
+}
+
+Error_t heap_array_object_get_elements(Object_t* object, void** output){
+    Error_t err = JERR_OK;
+    FAIL_SET_JUMP(object && object->class->flags.is_array == 1, err, JERR_TYPECHECK_FAILURE, exit);
+    FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
+    
+    *output = (((char*)object) + sizeof(*object) + sizeof(int32_t));
 
 exit:
     return err;
@@ -100,6 +143,16 @@ static void gc_scan_threads(struct list_head* output_list){
                     }
                 }
             }
+
+            Monitor_t* monitor = NULL;
+            list_for_each_entry(monitor, &cur->held_monitors, list){
+                Object_t* object = monitor->owner_object;
+                if(object && object->forward != GC_MARK_SENTINEL){
+                    object->forward = GC_MARK_SENTINEL;
+                    INIT_LIST_HEAD(&object->list);
+                    list_add_tail(&object->list, output_list);
+                }                
+            }
         }
     }
 }
@@ -110,6 +163,13 @@ static void gc_scan_classes(struct list_head* output_list){
 
     Class_t* class = NULL;
     list_for_each_entry(class, class_list, list){
+        Object_t* object = class->class_object;
+        if(object && object->forward != GC_MARK_SENTINEL){
+            object->forward = GC_MARK_SENTINEL;
+            INIT_LIST_HEAD(&object->list);
+            list_add_tail(&object->list, output_list);
+        } 
+
         int32_t* storage = class->storage;
         for(unsigned i = 0; i < class->static_fields.count; i++){
             Field_t* field = &class->static_fields.fields[i];
@@ -122,8 +182,21 @@ static void gc_scan_classes(struct list_head* output_list){
                 }                
             }
         }
+
+        for(unsigned i = 0; i < class->symtab.count; i++){
+            ClassSymbol_t* sym = &class->symtab.symbols[i];
+            if(sym->type == SYMBOL_STRING){
+                Object_t* object = sym->value;
+                if(object && object->forward != GC_MARK_SENTINEL){
+                    object->forward = GC_MARK_SENTINEL;
+                    INIT_LIST_HEAD(&object->list);
+                    list_add_tail(&object->list, output_list);                    
+                }
+            }
+        }
     }
 }
+
 
 static void gc_scan(){
     LIST_HEAD(root_list);
@@ -153,14 +226,30 @@ static void gc_scan(){
                         }
                     }
                 }
-            } else assert(0 && "TODO:");
+            } else if(object->class->array_type == TYPE_REFERENCE){
+                int32_t length = 0;
+                Object_t** elements = NULL;
+
+                assert(heap_array_object_get_length(object, &length) == JERR_OK);
+                assert(heap_array_object_get_elements(object, (void**)&elements) == JERR_OK);
+
+                for(unsigned i = 0; i < length; i++){
+                    Object_t* found = elements[i];
+                    if(found && found->forward != GC_MARK_SENTINEL){
+                        found->forward = GC_MARK_SENTINEL;
+                        INIT_LIST_HEAD(&found->list);
+                        list_add_tail(&found->list, &root_list);
+                    }                    
+                }
+            }
         }
     }
 }
 
 static void* gc_calculate_forwards(struct list_head* live_list){
     bump_allocator_t calculation_arena = s_gc_heap; //hack to make it 100% match with actual bumper logic in future(in case alligment is added)
-    
+    bump_allocator_t walk_arena = s_gc_heap;
+
     void* heap_end = calculation_arena.last_end;
     void* heap_start = calculation_arena.memory;
     void* scanner = heap_start;
@@ -169,17 +258,18 @@ static void* gc_calculate_forwards(struct list_head* live_list){
 
     while(scanner < heap_end){
         Object_t* object = scanner; //Can we trust that every data on heap arena is object?
-        size_t object_size = (object->class->flags.is_array ? assert(0 && "TODO: array support"), 0 : (object->class->object_size * sizeof(int32_t))) + sizeof(Object_t);
+        size_t object_size = object->class->flags.is_array ? (value_type_size[object->class->array_type] * (*(int32_t*)(((char*)object) + sizeof(*object)))) + sizeof(int32_t) + sizeof(*object) 
+                                                           : object->class->object_size + sizeof(Object_t);
 
-        if(object->forward == 4152828064){
-            printf("BREAK NOW!\n");
-        }
         if(object->forward == GC_MARK_SENTINEL){
-            object->forward = (uint32_t)bumper_alloc(&calculation_arena, object_size); //This DOES NOT modify heap contents, its not calloc!
+            object->forward = bumper_alloc(&calculation_arena, object_size); //This DOES NOT modify heap contents, its not calloc!
             assert(object->forward && "WTF we even failed HERE???");
 
             INIT_LIST_HEAD(&object->list); //We need to resurect this list from the dead!
             list_add_tail(&object->list,live_list);
+        } else {
+            monitor_free(object);
+            //TODO: call finalize
         }
 
         scanner += object_size;
@@ -199,7 +289,7 @@ static void gc_patch(struct list_head* live_list){
                 if(SHADOW_GET_REF(cur->shadow_stack, i)){
                     Object_t* object = (Object_t*)cur->stack[i];
                     if(object && object->forward != GC_MARK_SENTINEL){
-                        cur->stack[i] = object->forward;
+                        cur->stack[i] = (int32_t)object->forward;
                     }
                 }
             }
@@ -208,9 +298,17 @@ static void gc_patch(struct list_head* live_list){
                 if(SHADOW_GET_REF(cur->shadow_locals, i)){
                     Object_t* object = (Object_t*)cur->locals[i];
                     if(object && object->forward != GC_MARK_SENTINEL){
-                        cur->locals[i] = object->forward;
+                        cur->locals[i] = (int32_t)object->forward;
                     }
                 }
+            }
+
+            Monitor_t* monitor = NULL;
+            list_for_each_entry(monitor, &cur->held_monitors, list){
+                Object_t* object = monitor->owner_object;
+                if(object && object->forward != GC_MARK_SENTINEL){
+                    monitor->owner_object = object->forward;
+                }                
             }
         }
     } 
@@ -221,16 +319,32 @@ static void gc_patch(struct list_head* live_list){
 
     Class_t* class = NULL;
     list_for_each_entry(class, class_list, list){
+        Object_t* object = class->class_object;
+        if(object && object->forward != GC_MARK_SENTINEL){
+            class->class_object = object->forward;
+        } 
+
+    
         int32_t* storage = class->storage;
         for(unsigned i = 0; i < class->static_fields.count; i++){
             Field_t* field = &class->static_fields.fields[i];
             if(field->type == TYPE_REFERENCE){
                 Object_t* object = (Object_t*)storage[field->offset];
                 if(object && object->forward != GC_MARK_SENTINEL){
-                    storage[field->offset] = object->forward;
+                    storage[field->offset] = (int32_t)object->forward;
                 }                
             }
         }
+
+        for(unsigned i = 0; i < class->symtab.count; i++){
+            ClassSymbol_t* sym = &class->symtab.symbols[i];
+            if(sym->type == SYMBOL_STRING){
+                Object_t* object = sym->value;
+                if(object && object->forward != GC_MARK_SENTINEL){
+                    sym->value = object->forward;                
+                }
+            }
+        }        
     }   
     //=============================
 
@@ -246,23 +360,35 @@ static void gc_patch(struct list_head* live_list){
                     if(field->type == TYPE_REFERENCE){
                         Object_t* found = (Object_t*)storage[field->offset];
                         if(found && found->forward != GC_MARK_SENTINEL){
-                            storage[field->offset] = found->forward;
+                            storage[field->offset] = (int32_t)found->forward;
                         }
                     }
                 }
             }
-        } else assert(0 && "TODO:");
+        } else if(object->class->array_type == TYPE_REFERENCE){
+            int32_t length = 0;
+            Object_t** elements = NULL;
+
+            assert(heap_array_object_get_length(object, &length) == JERR_OK);
+            assert(heap_array_object_get_elements(object, (void**)&elements) == JERR_OK);
+
+            for(unsigned i = 0; i < length; i++){
+                Object_t* found = elements[i];
+                if(found && found->forward != GC_MARK_SENTINEL){
+                    elements[i] = found->forward;
+                }                    
+            }
+        }
     }
     //=====================
 }
 
-#include <string.h>
-static int gc_iterations = 0;
 static void gc_move(struct list_head* live_list){
     Object_t *object = NULL, *tmp = NULL;
     list_for_each_entry_safe(object, tmp, live_list, list){
         list_del_init(&object->list);
-        size_t object_size = (object->class->flags.is_array ? assert(0 && "TODO: array support"), 0 : (object->class->object_size * sizeof(int32_t))) + sizeof(Object_t);
+        size_t object_size = object->class->flags.is_array ? (value_type_size[object->class->array_type] * (*(int32_t*)(((char*)object) + sizeof(*object)))) + sizeof(int32_t) + sizeof(*object) 
+                                                           : object->class->object_size + sizeof(Object_t);
 
         void* move_to = (void*)object->forward;
         object->forward = 0;
@@ -280,6 +406,4 @@ void heap_gc_start(){
     s_gc_heap.last_end = gc_calculate_forwards(&live_list);
     gc_patch(&live_list);
     gc_move(&live_list);
-
-    gc_iterations++;
 }

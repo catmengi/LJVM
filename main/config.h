@@ -14,5 +14,6 @@
 #define THREAD_DEFAULT_PRIORITY 5
 
 #define OBJECT_HEAP_SIZE 2 MB
+#define MAX_MONITORS 512
 
 void JEspresso_init();

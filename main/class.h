@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "list.h"
 #include "jerror.h"
+#include "monitor.h"
 
 #define MAX_LOADED_CLASSES 1024
 typedef struct Class_t Class_t;
@@ -63,13 +64,13 @@ typedef struct{
     ClassSymbol_t* symbols;
 }ClassSymbolTable_t;
 
-typedef struct{
+typedef struct Field_t{
     uint16_t name_id;
     JavaValueType_t type; //Still store type separately for faster opcodes on resolved fields
     size_t offset; //offset is in uint32_t words!
+    size_t size; //size in bytes
     
     Class_t* class;
-    //uint8_t size; //size is in uint32_t words!
 
     struct{
         union{
@@ -84,7 +85,7 @@ typedef struct{
                          //So if constantpool entry was resolved, and this field wasnt initalised yet, we can use resolved value and vise-versa
 }Field_t;
 
-typedef struct{
+typedef struct Method_t{
     uint16_t name_id;
     uint16_t vtable_index;
     uint16_t interface_index;
@@ -100,6 +101,7 @@ typedef struct{
                 unsigned is_special:1;
                 unsigned is_virtual:1; //!(is_static || is_special)
                 unsigned is_interface:1;
+                unsigned is_syncronized:1;
             };
         };
     }flags; 
@@ -200,6 +202,7 @@ typedef struct Class_t{
     Class_t* parent;
     ImplementsTable_t implements;
     ClassSymbolTable_t symtab;
+    Object_t* class_object; //java.lang.Class instance
 
     struct{
         union{
@@ -214,13 +217,14 @@ typedef struct Class_t{
             };
         };
     }flags;
+    JavaValueType_t array_type; //Only usable if is_array == 1!, other wise TYPE_VOID
 
     //Fields info
     //Separated to simplify GC scan logic.
     FieldTable_t instance_fields;
     FieldTable_t static_fields;
 
-    size_t object_size; //Parent sizes + self size. Size in uint32_t words
+    size_t object_size; //Size of class data in BYTES (for easier allocation logic)
     int32_t* storage; //Static fields storage
 
     //Method info
@@ -236,8 +240,6 @@ typedef struct{
 }ClassTable_t;
 
 void classes_init(); //Not to be called by user!
-
-unsigned class_field_sizeof(JavaValueType_t type);
 
 Class_t* class_find(uint16_t name_id);
 Error_t class_insert(Class_t* klass);
