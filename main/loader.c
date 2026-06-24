@@ -1,25 +1,38 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include <stdio.h>
 #include <string.h>
 
 #include "parser.h"
 #include "stream.h"
 #include "loader.h"
-#include "builtin_classes.h"
 
 
 static char* system_prefixes[] = {"java/"};
-static BuiltinClassEntry_t* builtin_classes[] = {
-    &java_lang_Object,
-};
 
 static char s_path[256 + sizeof(".class") + 1] = {0};
 static char s_app_classpath[256] = {0};
+static char s_system_classpath[256] = {0};
 static memstream_t s_memstream = {0};
 
 static bool is_system_class(char* class_name){
-    return false; //Debug measure to not re add classes into code every time i change them
-
-
     for(unsigned i = 0; i < sizeof(system_prefixes) / sizeof(system_prefixes[0]); i++){
         if(strncmp(class_name, system_prefixes[i], strlen(system_prefixes[i])) == 0) return true;
     }
@@ -28,20 +41,12 @@ static bool is_system_class(char* class_name){
 }
 
 static int init_classtream(char* class_name, ClassStream_t* classstream){
-    if(is_system_class(class_name)){
-        for(unsigned i = 0; i < sizeof(builtin_classes) / sizeof(builtin_classes[0]); i++){
-            BuiltinClassEntry_t* builtin = builtin_classes[i];
-            if(strcmp(builtin->name, class_name) == 0){
-                memstream_init(&s_memstream, builtin->classfile, builtin->classfile_len);
-                return classstream_init_memstream(classstream, &s_memstream);
-            }
-        }
-    } else {
-        memset(s_path, 0, sizeof(s_path));
-        snprintf(s_path, sizeof(s_path), "%s/%s.class", s_app_classpath, class_name);
+    char* class_path = is_system_class(class_name) ? s_system_classpath : s_app_classpath;
 
-        return classstream_init_file(classstream, fopen(s_path, "rb"));
-    }
+    memset(s_path, 0, sizeof(s_path));
+    snprintf(s_path, sizeof(s_path), "%s/%s.class", class_path, class_name);
+
+    return classstream_init_file(classstream, fopen(s_path, "rb"));
 
     return -1;
 }
@@ -53,10 +58,17 @@ JRawClass_t* loader_load_class(char* name){
     return parser_parse_class(&stream);
 }
 
-int loader_set_loadpath(char* path){
+int loader_set_apppath(char* path){
     if(!path || strlen(path) >= sizeof(s_app_classpath)) return 1;
     strncpy(s_app_classpath, path, sizeof(s_app_classpath));
 
     return 1;
+}
+
+int loader_set_systempath(char* path){
+    if(!path || strlen(path) >= sizeof(s_system_classpath)) return 1;
+    strncpy(s_system_classpath, path, sizeof(s_system_classpath));
+
+    return 1;    
 }
 

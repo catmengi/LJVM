@@ -17,12 +17,22 @@ You should have received a copy of the GNU General Public License
 along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+package java.lang;
 
-#include <stdint.h>
+public class Object{
+    public native void wait();
+    public native void wait(long millis);
+    public native void wait(long millis, int nanos);
 
-#define STRINGPOOL_SIZE 32768
+    public native void notify();
+    public native void notifyAll();
 
-void stringpool_init();
-int stringpool_add(char* string);
-char* stringpool_get(int index);
+    public native int hashCode();
+    public native final Class getClass();
+
+    public boolean equals(Object obj){
+        return this == obj;
+    }
+
+
+}

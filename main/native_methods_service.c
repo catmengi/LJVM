@@ -1,37 +1,45 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "native_methods_service.h"
 #include "heap.h"
 #include "thread.h"
 
 #include <string.h>
 
-static NativeMethodReturnValue_t debug_native(Thread_t* thread,Method_t* self, int32_t* params){
-    NativeMethodReturnValue_t retval = {.err = JERR_OK};
-    *(int32_t*)retval.value = params[0] + 488;
-
-    return retval;
-}
-
-static NativeMethodReturnValue_t debug_print(Thread_t* thread, Method_t* self, int32_t* params){
-    printf("debug: %d\n", params[0]);
-    return (NativeMethodReturnValue_t){.err = JERR_OK, .value = {0}};
-}
-
-static NativeMethodReturnValue_t debug_gc(Thread_t* thread, Method_t* self, int32_t* args){
-    heap_gc_start();
-    return (NativeMethodReturnValue_t){.err = JERR_OK};
-}
-
-static NativeMethodEntry_t* s_native_methods[] = {&(NativeMethodEntry_t){"debug_native@(I)I", "dummy", debug_native},
-                                                  &(NativeMethodEntry_t){"debug_print@(I)V", "dummy", debug_print},
-                                                  &(NativeMethodEntry_t){"debug_gc@()V", "dummy", debug_gc}};
-
+extern NativeClass_t java_lang_Object;
+static NativeClass_t* s_natives[] = {
+    &java_lang_Object,
+};
 
 //Requires name in mangled form!
 NativeMethod_t natives_find(char* class_name, char* method_name){
-    for(unsigned i = 0; i < sizeof(s_native_methods) / sizeof(s_native_methods[0]); i++){
-        NativeMethodEntry_t* entry = s_native_methods[i];
-        if(strcmp(entry->class_name, class_name) == 0 && strcmp(entry->mangled_name, method_name) == 0)
-            return entry->method;
+    for(unsigned i = 0; i < sizeof(s_natives) / sizeof(s_natives[0]); i++){
+        NativeClass_t* class = s_natives[i];
+        if(strcmp(class_name, class->name) == 0){
+            for(unsigned j = 0; j < class->methods_count; j++){
+                NativeMethodDescriptor_t* method = &class->methods[j];
+                if(strcmp(method->name, method_name) == 0){
+                    return method->method;
+                }
+            }
+        }
     }
 
     return NULL;

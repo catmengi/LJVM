@@ -1,3 +1,22 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "config.h"
 
 #include "class.h"
@@ -618,6 +637,10 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         field->size = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
         offsets[is_static] += field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? 2 : 1;
 
+        field->flags.is_public = (raw_field->flags & ACC_PUBLIC) == ACC_PUBLIC;
+        field->flags.is_private = (raw_field->flags & ACC_PRIVATE) == ACC_PRIVATE;
+        field->flags.is_protected = (raw_field->flags & ACC_PROTECTED) == ACC_PROTECTED;
+
         int name_id = stringpool_add(mangled_name);
         FAIL_SET_JUMP(name_id >= 0, err, JERR_OOM, exit);
 
@@ -654,10 +677,14 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->flags.is_native = (raw_method->flags & ACC_NATIVE) == ACC_NATIVE;
         method->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
         method->flags.is_syncronized = (raw_method->flags & ACC_SYNCHRONIZED) == ACC_SYNCHRONIZED;
+        method->flags.is_public = (raw_method->flags & ACC_PUBLIC) == ACC_PUBLIC;
+        method->flags.is_private = (raw_method->flags & ACC_PRIVATE) == ACC_PRIVATE;
+        method->flags.is_protected = (raw_method->flags & ACC_PROTECTED) == ACC_PROTECTED;
 
         method->flags.is_static = is_static;
         method->flags.is_virtual = !(is_static || is_special);
         method->flags.is_special = is_special;
+
         
         method->class = this_class;
 
@@ -824,7 +851,7 @@ static Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
-inline Error_t class_resolv_symbol(ClassSymbol_t* symbol){
+Error_t class_resolv_symbol(ClassSymbol_t* symbol){
     Error_t err = JERR_OK;
 
     if(symbol->type < PROXY_SYMBOL_CLASS) return JERR_OK;
@@ -951,9 +978,16 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
     FAIL_SET_JUMP(!clinit || (err = java_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
 
+    Field_t* nativeClassPointer_field = NULL;
     Class_t* jlClass = NULL;
     FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
+
+    int32_t* fields = NULL;
+    FAIL_SET_JUMP((err = heap_class_object_get_fields(jlClass, &fields)) == JERR_OK, err, err, exit);
+
+    fields[nativeClassPointer_field->offset] = (int32_t)this_class;
 
 exit:
     return 0;
@@ -1002,5 +1036,13 @@ bool class_is_compatible(Class_t* class, Class_t* compatible_to){
                 return true;
         }
     }
+    return false;
+}
+
+bool class_is_subclass(Class_t* is_subclass, Class_t* to){
+    for(Class_t* cur = is_subclass; cur; cur = cur->parent){
+        if(cur == to) return true;
+    }
+
     return false;
 }

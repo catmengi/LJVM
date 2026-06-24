@@ -1,0 +1,82 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "../../../native_methods_service.h"
+#include "../../../monitor.h"
+#include "../../../heap.h"
+
+#include <assert.h>
+
+static NativeMethodReturnValue_t wait(Thread_t* thread, Method_t* self, int32_t* args){
+    Error_t err = JERR_UNKNOWN;
+
+    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_wait((Object_t*)args[0], thread)};
+    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+}
+static NativeMethodReturnValue_t waitMillis(Thread_t* thread, Method_t* self, int32_t* args){
+    Error_t err = JERR_UNKNOWN;
+
+    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], thread, *(int64_t*)&args[1])};
+    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+}
+
+static NativeMethodReturnValue_t waitMillisNanos(Thread_t* thread, Method_t* self, int32_t* args){
+    Error_t err = JERR_UNKNOWN;
+
+    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], thread, *(int64_t*)&args[1] + args[3])};
+    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+}
+
+static NativeMethodReturnValue_t notify(Thread_t* thread, Method_t* self, int32_t* args){
+    return (NativeMethodReturnValue_t){monitor_notify((Object_t*)args[0], thread)};
+}
+
+static NativeMethodReturnValue_t notifyAll(Thread_t* thread, Method_t* self, int32_t* args){
+    return (NativeMethodReturnValue_t){monitor_notifyAll((Object_t*)args[0], thread)};
+}
+
+static NativeMethodReturnValue_t hashCode(Thread_t* thread, Method_t* self, int32_t* args){
+    NativeMethodReturnValue_t retval = {0};
+    retval.err = JERR_OK;
+    *(int32_t*)retval.value = ((Object_t*)args[0])->ident;
+
+    return retval;
+}
+
+static NativeMethodReturnValue_t getClass(Thread_t* thread, Method_t* self, int32_t* args){
+    NativeMethodReturnValue_t retval = {0};
+    retval.err = JERR_OK;
+    *(Object_t**)retval.value = ((Object_t*)args[0])->class->class_object;
+
+    return retval;    
+}
+
+NativeClass_t java_lang_Object = {
+    .name = "java/lang/Object",
+    .methods_count = 7,
+    .methods = (NativeMethodDescriptor_t[7]){
+        {"wait@()V", wait},
+        {"wait@(J)V", waitMillis},
+        {"wait@(JI)V", waitMillisNanos},
+        {"notify@()V",notify},
+        {"notifyAll@()V", notifyAll},
+        {"hashCode@()I", hashCode},
+        {"getClass@()Ljava/lang/Class;", getClass},
+    },
+};

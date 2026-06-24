@@ -1,3 +1,22 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "thread.h"
 #include "bumper.h"
 #include "class.h"
@@ -16,10 +35,12 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 
 static struct list_head s_active_threads;
 static struct list_head s_free_threads;
+static struct list_head s_sleeping_threads;
 
 static Thread_t s_threads[THREAD_MAX_COUNT] = {0};
 static size_t s_active_threads_count = 0;
@@ -32,6 +53,7 @@ void threads_init(){
 
     INIT_LIST_HEAD(&s_active_threads);
     INIT_LIST_HEAD(&s_free_threads);
+    INIT_LIST_HEAD(&s_sleeping_threads);
 
     for(unsigned i = 0; i < THREAD_MAX_COUNT; i++){
         Thread_t* thread = &s_threads[i];
@@ -48,6 +70,10 @@ struct list_head* threads_get_schedule_list(){
     return &s_active_threads;
 }
 
+struct list_head* threads_get_sleep_list(){
+    return &s_sleeping_threads;
+}
+
 Thread_t* thread_alloc(){
     Thread_t* inactive = NULL;
     list_for_each_entry(inactive, &s_free_threads, list) break;
@@ -55,7 +81,10 @@ Thread_t* thread_alloc(){
     if(inactive){
         INIT_LIST_HEAD(&inactive->joiners);
         INIT_LIST_HEAD(&inactive->gc_list);
+        INIT_LIST_HEAD(&inactive->sleep_list);
 
+        inactive->wakeup_on = 0;
+        inactive->wake_recursion = 0;
         list_del(&inactive->list);
 
         memset(inactive->stackbuf, 0, sizeof(inactive->stackbuf));
@@ -66,7 +95,7 @@ Thread_t* thread_alloc(){
 }
 
 void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
-    thread->state = THREAD_ACTIVE;
+    //thread->state = THREAD_ACTIVE;
     thread->opcode_quota = THREAD_LOWEST_QUOTA * THREAD_DEFAULT_PRIORITY;
     
     CallFrame_t* base_frame = thread_frame_push(thread, method);
@@ -149,10 +178,20 @@ void thread_join(Thread_t* thread, Thread_t* join_to){
     list_add(&thread->list, &join_to->joiners);
 }
 
+uint64_t thread_time_ns_get(){
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    return ts.tv_nsec + ((uint64_t)ts.tv_sec * 1e+9);
+}
 
 //Will not work from any code which execution was triggered by java_method_invoke
 void thread_sleep(Thread_t* thread, uint32_t ms){
-    assert(0 && "TODO: sleep");
+    list_del_init(&thread->sleep_list);
+    list_del_init(&thread->list);
+
+    thread->wakeup_on = (ms * 1e+6) + thread_time_ns_get();
+    list_add_tail(&thread->sleep_list, &s_sleeping_threads);
 }
 
 static Error_t interpret_bytecode(Thread_t* thread);
@@ -162,25 +201,28 @@ Error_t thread_schedule(){
     Error_t err = JERR_OK;
 
     while(s_active_threads_count){
+        bool should_sleep = true;
+
         Thread_t *thread = NULL, *tmp = NULL;
         list_for_each_entry_safe(thread, tmp, &s_active_threads, list){
-            switch(thread->state){
-                case THREAD_ACTIVE:{
-                    err = interpret_bytecode(thread);
-                    FAIL_SET_JUMP(err == JERR_OK || err == JERR_SCHEDULE, err, err, exit);
+            err = interpret_bytecode(thread);
+            FAIL_SET_JUMP(err == JERR_OK || err == JERR_SCHEDULE, err, err, exit);
+            if(err != JERR_SCHEDULE) thread_kill(thread);
 
-                    if(err != JERR_SCHEDULE) thread_kill(thread);
-                }
-                break;
+            should_sleep = false;
+        }
 
-                case THREAD_BLOCKED_SLEEP:{
-                    assert(0 && "TODO: THREAD_BLOCKED_SLEEP");
-                }
-                break;
+        list_for_each_entry_safe(thread, tmp, &s_sleeping_threads, sleep_list){
+            if(thread_time_ns_get() >= thread->wakeup_on){
+                list_del_init(&thread->sleep_list);
+                list_del_init(&thread->list);
+                list_add_tail(&thread->list, &s_active_threads);
 
-                default: return JERR_UNKNOWN;
+                should_sleep = false;
             }
         }
+
+        if(should_sleep) usleep(100000);
     }
 
 exit:
@@ -218,7 +260,7 @@ exit:
 })
 
 #define STACK_POP_FLOAT(frame) ({ \
-    if ((frame)->sp == 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    if ((frame)->sp == 0) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     (frame)->sp--; \
     if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
@@ -227,7 +269,7 @@ exit:
 })
 
 #define STACK_POP_REF(frame) ({ \
-    if ((frame)->sp == 0) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    if ((frame)->sp == 0) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     (frame)->sp--; \
     if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 1) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
@@ -253,7 +295,7 @@ exit:
 })
 
 #define STACK_POP_LONG(frame) ({ \
-    if ((frame)->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; } \
+    if ((frame)->sp < 2) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     (frame)->sp--; \
     if (SHADOW_GET_REF((frame)->shadow_stack, (frame)->sp) != 0) {err = JERR_TYPECHECK_FAILURE; goto exit; } \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
@@ -385,23 +427,20 @@ exit:
 }})
 
 static Error_t native_method_invoke(Thread_t* thread, CallFrame_t* frame, Method_t* method){
-    Error_t err = JERR_OK;
+    int32_t* args = &frame->stack[frame->sp - method->args_slots];
+    NativeMethodReturnValue_t retval = ((NativeMethod_t)method->code)(thread,method,args);
 
-    int32_t* args = &frame->stack[frame->sp -= method->args_slots];
+    switch(retval.err){
+        case JERR_OK:
+            frame->sp -= method->args_slots;
+            STACK_PUSH_GENERIC(frame, method->return_type, retval.value);
+            return retval.err;
 
-    NativeMethod_t native = natives_find(stringpool_get(method->class->name_id), stringpool_get(method->name_id));
-    FAIL_SET_JUMP(native, err, JERR_NOTFOUND, exit);
+        case JERR_EXCEPTION: 
+            return thread_throw_exception(thread, *(Object_t**)retval.value);
 
-    NativeMethodReturnValue_t retval = native(thread,method,args);
-    FAIL_SET_JUMP(retval.err == JERR_OK, err, retval.err, exit);
-
-    STACK_PUSH_GENERIC(frame, method->return_type, retval.value);
-
-exit:
-    if(err == JERR_EXCEPTION){
-        return thread_throw_exception(thread, *(Object_t**)retval.value);
+        default: return retval.err;
     }
-    return err;
 }
 
 static bool interpreter_check_arguments(Method_t* method, uint32_t* shadow_stack, uint32_t sp){
@@ -419,7 +458,7 @@ Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_va
     
     FAIL_SET_JUMP(method && (arguments || method->args_slots == 0) && (return_value || method->return_type == TYPE_VOID), err, JERR_BADPARAM, exit);
 
-    thread.state = THREAD_PSEUDO;
+    //thread.state = THREAD_PSEUDO;
     INIT_LIST_HEAD(&thread.list);
     INIT_LIST_HEAD(&thread.joiners);
     INIT_LIST_HEAD(&thread.gc_list);
@@ -450,10 +489,23 @@ exit:
     return err;
 }
 
+static void frame_unlock_monitors(CallFrame_t* frame, Thread_t* thread){
+    Monitor_t *monitor = NULL, *tmp = NULL;
+    list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
+        assert(monitor_exit(monitor, thread) == JERR_OK);
+    }
+}
 
 Error_t thread_throw_exception(Thread_t* thread, Object_t* exception_object){
+    assert(0);
     size_t unwind_by = 0;
-    for(CallFrame_t* frame = thread->top_frame; frame; frame = frame->prev, thread->top_frame = frame){
+
+    Class_t* throwable = NULL;
+    assert(exception_object);
+    assert(class_load_bynameid(stringpool_add("java/lang/Throwable"), &throwable) == JERR_OK);
+    assert(class_is_compatible(exception_object->class, throwable));
+
+    for(CallFrame_t* frame = thread->top_frame; frame; frame = frame->prev, thread->top_frame = frame, frame_unlock_monitors(frame, thread)){
         MethodBytecode_t* bytecode = frame->method->code;
         assert(frame == thread->top_frame);
 
@@ -469,7 +521,6 @@ Error_t thread_throw_exception(Thread_t* thread, Object_t* exception_object){
 
                 if(exception->type == NULL || class_is_compatible(exception_object->class,exception_type_symbol->value)){
                     bumper_unwind(&thread->frame_allocator, unwind_by);
-                    //TODO: monitor  support
 
                     frame->pc = bytecode->code + exception->handler_pc;
                     frame->sp = 0;
@@ -635,13 +686,78 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         [EJOPCODE_AASTORE] = &&EJOPCODE_AASTORE,
 
         [EJOPCODE_ANEWARRAY] = &&EJOPCODE_ANEWARRAY,
+        [EJOPCODE_MONITORENTER] = &&EJOPCODE_MONITORENTER,
+        [EJOPCODE_MONITOREXIT] = &&EJOPCODE_MONITOREXIT,
+        [EJOPCODE_INSTANCEOF] = &&EJOPCODE_INSTANCEOF,
+        [EJOPCODE_CHECKCAST] = &&EJOPCODE_CHECKCAST,
+        [EJOPCODE_ATHROW] = &&EJOPCODE_ATHROW,
+
+        [EJOPCODE_NOP]          = &&EJOPCODE_NOP,
+        [EJOPCODE_POP2]         = &&EJOPCODE_POP2,
+        [EJOPCODE_DUP_X1]       = &&EJOPCODE_DUP_X1,
+        [EJOPCODE_DUP_X2]       = &&EJOPCODE_DUP_X2,
+        [EJOPCODE_DUP2]         = &&EJOPCODE_DUP2,
+        [EJOPCODE_DUP2_X1]      = &&EJOPCODE_DUP2_X1,
+        [EJOPCODE_DUP2_X2]      = &&EJOPCODE_DUP2_X2,
+        [EJOPCODE_SWAP]         = &&EJOPCODE_SWAP,
+
+        [EJOPCODE_INEG]         = &&EJOPCODE_INEG,
+        [EJOPCODE_LNEG]         = &&EJOPCODE_LNEG,
+        [EJOPCODE_FNEG]         = &&EJOPCODE_FNEG,
+        [EJOPCODE_DNEG]         = &&EJOPCODE_DNEG,
+
+        [EJOPCODE_ISHL]         = &&EJOPCODE_ISHL,
+        [EJOPCODE_LSHL]         = &&EJOPCODE_LSHL,
+        [EJOPCODE_ISHR]         = &&EJOPCODE_ISHR,
+        [EJOPCODE_LSHR]         = &&EJOPCODE_LSHR,
+        [EJOPCODE_IUSHR]        = &&EJOPCODE_IUSHR,
+        [EJOPCODE_LUSHR]        = &&EJOPCODE_LUSHR,
+
+        [EJOPCODE_IAND]         = &&EJOPCODE_IAND,
+        [EJOPCODE_LAND]         = &&EJOPCODE_LAND,
+        [EJOPCODE_IOR]          = &&EJOPCODE_IOR,
+        [EJOPCODE_LOR]          = &&EJOPCODE_LOR,
+        [EJOPCODE_IXOR]         = &&EJOPCODE_IXOR,
+        [EJOPCODE_LXOR]         = &&EJOPCODE_LXOR,
+
+        [EJOPCODE_I2L]          = &&EJOPCODE_I2L,
+        [EJOPCODE_I2F]          = &&EJOPCODE_I2F,
+        [EJOPCODE_I2D]          = &&EJOPCODE_I2D,
+        [EJOPCODE_L2I]          = &&EJOPCODE_L2I,
+        [EJOPCODE_L2F]          = &&EJOPCODE_L2F,
+        [EJOPCODE_L2D]          = &&EJOPCODE_L2D,
+        [EJOPCODE_F2I]          = &&EJOPCODE_F2I,
+        [EJOPCODE_F2L]          = &&EJOPCODE_F2L,
+        [EJOPCODE_F2D]          = &&EJOPCODE_F2D,
+        [EJOPCODE_D2I]          = &&EJOPCODE_D2I,
+        [EJOPCODE_D2L]          = &&EJOPCODE_D2L,
+        [EJOPCODE_D2F]          = &&EJOPCODE_D2F,
+        [EJOPCODE_I2B]          = &&EJOPCODE_I2B,
+        [EJOPCODE_I2C]          = &&EJOPCODE_I2C,
+        [EJOPCODE_I2S]          = &&EJOPCODE_I2S,
+
+        [EJOPCODE_LCMP]         = &&EJOPCODE_LCMP,
+        [EJOPCODE_FCMPL]        = &&EJOPCODE_FCMPL,
+        [EJOPCODE_FCMPG]        = &&EJOPCODE_FCMPG,
+        [EJOPCODE_DCMPL]        = &&EJOPCODE_DCMPL,
+        [EJOPCODE_DCMPG]        = &&EJOPCODE_DCMPG,
+
+        [EJOPCODE_IF_ACMPEQ]    = &&EJOPCODE_IF_ACMPEQ,
+        [EJOPCODE_IF_ACMPNE]    = &&EJOPCODE_IF_ACMPNE,
+
+        [EJOPCODE_IFEQ]         = &&EJOPCODE_IFEQ,
+        [EJOPCODE_IFNE]         = &&EJOPCODE_IFNE,
+        [EJOPCODE_IFLT]         = &&EJOPCODE_IFLT,
+        [EJOPCODE_IFGE]         = &&EJOPCODE_IFGE,
+        [EJOPCODE_IFGT]         = &&EJOPCODE_IFGT,
+        [EJOPCODE_IFLE]         = &&EJOPCODE_IFLE,
     };
 
     // Helper to advance PC and jump to next opcode
     #define NEXT() ({ \
         frame->pc += 1 + JOpcode_args_sizes[*frame->pc]; \
         if (opcodes_executed++ == thread->opcode_quota && thread->opcode_quota > 0) \
-            return JERR_SCHEDULE; \
+            return JERR_SCHEDULE;\
         goto *opcode_labels[*frame->pc]; \
     })
 
@@ -790,20 +906,19 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     // ========== RETURNS ==========
     EJOPCODE_RETURN:{
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
-        if (!(frame = thread_frame_pop(thread)))
-            goto exit;   // root method exit
+        if (!(frame = thread_frame_pop(thread))) return JERR_OK;
         NEXT();
     }
 
     EJOPCODE_IRETURN: {
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
         int32_t ret = STACK_POP_INT(frame);
@@ -814,9 +929,9 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     }
 
     EJOPCODE_FRETURN:{
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
         float ret = STACK_POP_FLOAT(frame);
@@ -827,9 +942,9 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     }
 
     EJOPCODE_ARETURN:{
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
         void* ret = STACK_POP_REF(frame);
@@ -840,9 +955,9 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     }
 
     EJOPCODE_LRETURN:{
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
         uint64_t ret = STACK_POP_LONG(frame);
@@ -853,9 +968,9 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     }
 
     EJOPCODE_DRETURN:{
-        Monitor_t *monitor = NULL, *tmp = NULL;
-        list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
-            FAIL_SET_JUMP((err = monitor_exit(monitor, thread)) == JERR_OK, err, err, exit);
+        if(frame->method->flags.is_syncronized){
+            Object_t* sync_object = frame->method->flags.is_static ? frame->method->class->class_object : (Object_t*)frame->locals[0];
+            FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor, thread)) == JERR_OK, err, err, exit);
         }
 
         double ret = STACK_POP_DOUBLE(frame);
@@ -865,13 +980,61 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         NEXT();
     }
 
+    //TODO: move access right checks somewhere else to make it one time (preferably on symbol resolution)
     // ========== FIELD ACCESS ==========
     EJOPCODE_PUTSTATIC: {
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchFieldError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, err, exit);
 
         Field_t* field = sym->value;
+        FAIL_SET_JUMP(field->flags.is_static, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IncompatibleClassChangeError"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
+        if(!field->flags.is_public){
+            if(!field->flags.is_private && !field->flags.is_protected){
+                //TODO: package protected access control
+            } else if(field->flags.is_private){
+                FAIL_SET_JUMP(field->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(field->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, field->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
+
         field->constantvalue = NULL;
         
         STACK_POP_GENERIC(frame, field->type, &field->class->storage[field->offset]);
@@ -880,10 +1043,58 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_GETSTATIC: {
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchFieldError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
+        FAIL_SET_JUMP(field->flags.is_static, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IncompatibleClassChangeError"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
+
+        if(!field->flags.is_public){
+            if(!field->flags.is_private && !field->flags.is_protected){
+                //TODO: package protected access control
+            } else if(field->flags.is_private){
+                FAIL_SET_JUMP(field->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(field->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, field->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
+
         void* value = &field->class->storage[field->offset];
 
         if (field->constantvalue) {
@@ -899,11 +1110,67 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     
     EJOPCODE_GETFIELD:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchFieldError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
+        FAIL_SET_JUMP(!field->flags.is_static, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IncompatibleClassChangeError"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
+        if(!field->flags.is_public){
+            if(!field->flags.is_private && !field->flags.is_protected){
+                //TODO: package protected access control
+            } else if(field->flags.is_private){
+                FAIL_SET_JUMP(field->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(field->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, field->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
+
         Object_t* object = STACK_POP_REF(frame);
+        FAIL_SET_JUMP(object, err, ({
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                (thread_throw_exception(thread, exception));            
+        }), exit);
 
         FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -918,14 +1185,70 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_PUTFIELD:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchFieldError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_BADPARAM, exit);
 
         Field_t* field = sym->value;
+        FAIL_SET_JUMP(!field->flags.is_static, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IncompatibleClassChangeError"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
+        if(!field->flags.is_public){
+            if(!field->flags.is_private && !field->flags.is_protected){
+                //TODO: package protected access control
+            } else if(field->flags.is_private){
+                FAIL_SET_JUMP(field->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(field->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, field->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
+
         int64_t value = 0;
 
         STACK_POP_GENERIC(frame, field->type, &value);
         Object_t* object = STACK_POP_REF(frame);
+        FAIL_SET_JUMP(object, err, ({
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                (thread_throw_exception(thread, exception));            
+        }), exit);
 
         FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -939,10 +1262,47 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     // ========== METHOD INVOCATION ==========
     EJOPCODE_INVOKESPECIAL:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchMethodError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* method = sym->value;
+
+        if(!method->flags.is_public){
+            if(!method->flags.is_private && !method->flags.is_protected){
+                //TODO: package protected access control
+            } else if(method->flags.is_private){
+                FAIL_SET_JUMP(method->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(method->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, method->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
 
         if (!method->flags.is_native) {
             CallFrame_t* new_frame = thread_frame_push(thread, method);
@@ -972,10 +1332,47 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_INVOKESTATIC:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchMethodError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* method = sym->value;
+
+        if(!method->flags.is_public){
+            if(!method->flags.is_private && !method->flags.is_protected){
+                //TODO: package protected access control
+            } else if(method->flags.is_private){
+                FAIL_SET_JUMP(method->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(method->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, method->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
 
         if (!method->flags.is_native){
             CallFrame_t* new_frame = thread_frame_push(thread, method);
@@ -1006,19 +1403,66 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_INVOKEVIRTUAL:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchMethodError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* template = sym->value;
         FAIL_SET_JUMP(interpreter_check_arguments(template, frame->shadow_stack, frame->sp - template->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
 
         Object_t* object = (Object_t*)frame->stack[frame->sp - template->args_slots];
+        FAIL_SET_JUMP(object, err, ({
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                (thread_throw_exception(thread, exception));            
+        }), exit);
+
         Class_t* object_class = object->class;
         FAIL_SET_JUMP(template->flags.is_virtual, err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP(template->vtable_index < object_class->vtable_size, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = object_class->vtable[template->vtable_index];
+
+        if(!method->flags.is_public){
+            if(!method->flags.is_private && !method->flags.is_protected){
+                //TODO: package protected access control
+            } else if(method->flags.is_private){
+                FAIL_SET_JUMP(method->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(method->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, method->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
 
         if (!method->flags.is_native) {
             CallFrame_t* new_frame = thread_frame_push(thread, method);
@@ -1047,13 +1491,34 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_INVOKEINTERFACE:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchMethodError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* template = sym->value;
         FAIL_SET_JUMP(interpreter_check_arguments(template, frame->shadow_stack, frame->sp - template->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
 
         Object_t* object = (Object_t*)frame->stack[frame->sp - template->args_slots];
+        FAIL_SET_JUMP(object, err, ({
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                (thread_throw_exception(thread, exception));            
+        }), exit);
+
         Class_t* object_class = object->class;
         FAIL_SET_JUMP(!template->flags.is_static, err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
@@ -1066,7 +1531,44 @@ static Error_t interpret_bytecode(Thread_t* thread) {
                 method = implementation->methods[template->interface_index];
             }
         }
-        FAIL_SET_JUMP(method, err, JERR_NOTFOUND, exit);
+        FAIL_SET_JUMP(method, err, ({
+            if(err == JERR_NOTFOUND){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoSuchMethodError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);         
+        }), exit);
+
+        if(!method->flags.is_public){
+            if(!method->flags.is_private && !method->flags.is_protected){
+                //TODO: package protected access control
+            } else if(method->flags.is_private){
+                FAIL_SET_JUMP(method->class == frame->method->class, err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            } else if(method->flags.is_protected){
+                FAIL_SET_JUMP(class_is_subclass(frame->method->class, method->class), err, ({
+                    Class_t* exception_class = NULL;
+                    Object_t* exception = NULL; 
+                    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalAccessError"), &exception_class)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                    FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                    (thread_throw_exception(thread, exception));            
+                }), exit);
+            }
+        }
 
         if (!method->flags.is_native) {
             CallFrame_t* new_frame = thread_frame_push(thread, method);
@@ -1092,6 +1594,8 @@ static Error_t interpret_bytecode(Thread_t* thread) {
             NEXT();
         }
     }
+    //========================================
+
 
     // ========== CONDITIONAL BRANCHES (int) ==========
     #define IF_CMP(OP) ({ \
@@ -1219,7 +1723,18 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_LDC:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint8_t*)(frame->pc + 1)];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOCLASSDEF){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoClassDefFoundError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit);
 
         switch(sym->type){
             default:
@@ -1232,6 +1747,10 @@ static Error_t interpret_bytecode(Thread_t* thread) {
             case SYMBOL_DOUBLE:
             case SYMBOL_STRING:
                 STACK_PUSH_GENERIC(frame, sym_to_value_type[sym->type], sym->value);
+                break;
+
+            case SYMBOL_CLASS:
+                STACK_PUSH_REF(frame, ((Class_t*)sym->value)->class_object);
                 break;
         }
 
@@ -1241,7 +1760,18 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     EJOPCODE_LDC2_W:
     EJOPCODE_LDC_W:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOCLASSDEF){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoClassDefFoundError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit);
 
         switch(sym->type){
             default:
@@ -1255,6 +1785,10 @@ static Error_t interpret_bytecode(Thread_t* thread) {
             case SYMBOL_STRING:
                 STACK_PUSH_GENERIC(frame, sym_to_value_type[sym->type], sym->value);
                 break;
+
+            case SYMBOL_CLASS:
+                STACK_PUSH_REF(frame, ((Class_t*)sym->value)->class_object);
+                break;
         }
 
         NEXT();
@@ -1262,11 +1796,44 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
     EJOPCODE_NEW:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, ({
+            if(err == JERR_NOCLASSDEF){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NoClassDefFoundError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
+        Class_t* class = sym->value;
+        
+        FAIL_SET_JUMP(!class->flags.is_abstract, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/InstantiationError"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
 
         Object_t* object = 0;
-        FAIL_SET_JUMP((err = heap_class_object_alloc(sym->value, &object)) == JERR_OK, err, err, exit); 
+        FAIL_SET_JUMP((err = heap_class_object_alloc(class, &object)) == JERR_OK, err, ({
+            if(err == JERR_OOM){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/OutOfMemoryError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit); 
 
         STACK_PUSH_REF(frame, object);
         NEXT();
@@ -1275,6 +1842,16 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     EJOPCODE_NEWARRAY:{
         uint8_t type = *(uint8_t*)(frame->pc + 1);
         int32_t length = STACK_POP_INT(frame);
+
+        FAIL_SET_JUMP(length >= 0, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NegativeArraySizeException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
 
         JavaValueType_t type_mapping[] = {[4] = TYPE_BOOL,
                                           [5] = TYPE_CHAR,
@@ -1285,13 +1862,24 @@ static Error_t interpret_bytecode(Thread_t* thread) {
                                           [10] = TYPE_INT,
                                           [11] = TYPE_LONG,};
 
-        Object_t* object = NULL;
+        Object_t* array = NULL;
         Class_t* array_class = NULL;
         char class_name[3] = {'[',type_mapping[type],'\0'};
         FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(class_name), &array_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &object)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, ({
+            if(err == JERR_OOM){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/OutOfMemoryError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
 
-        STACK_PUSH_REF(frame, object);
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit);
+
+        STACK_PUSH_REF(frame, array);
 
         NEXT();
     }
@@ -1304,7 +1892,15 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         Class_t* element_class = sym->value;
         int32_t length = STACK_POP_INT(frame);
 
-        FAIL_SET_JUMP(length >= 0, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(length >= 0, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NegativeArraySizeException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
 
         //Extensive string fuckery (i hate it)
         char* element_name = stringpool_get(element_class->name_id);
@@ -1321,7 +1917,18 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         Class_t* array_class = NULL;
         Object_t* array = NULL;
         FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(array_class_name), &array_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, ({
+            if(err == JERR_OOM){
+                Class_t* exception_class = NULL;
+                Object_t* exception = NULL; 
+                FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/OutOfMemoryError"), &exception_class)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+                FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+                err = thread_throw_exception(thread, exception);
+            }
+            (err);          
+        }), exit);
 
         STACK_PUSH_REF(frame, array);
 
@@ -1331,7 +1938,16 @@ static Error_t interpret_bytecode(Thread_t* thread) {
     EJOPCODE_ARRAYLENGTH:{
         int32_t length = 0;
         Object_t* object = STACK_POP_REF(frame);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
 
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+        
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
 
         STACK_PUSH_INT(frame, length);
@@ -1344,11 +1960,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int32_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_INT(frame, array[index]);
 
         NEXT();
@@ -1360,11 +1993,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int64_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_LONG(frame, array[index]);
 
         NEXT();
@@ -1376,11 +2026,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         float* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_FLOAT(frame, array[index]);
 
         NEXT();
@@ -1392,11 +2059,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         double* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_DOUBLE(frame, array[index]);
 
         NEXT();
@@ -1408,11 +2092,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         Object_t** array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_REF(frame, array[index]);
 
         NEXT();
@@ -1424,11 +2125,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int8_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_INT(frame, (int32_t)array[index]);
 
         NEXT();
@@ -1440,11 +2158,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         uint16_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_INT(frame, (int32_t)array[index]);
 
         NEXT();
@@ -1456,11 +2191,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int16_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         STACK_PUSH_INT(frame, (int32_t)array[index]);
 
         NEXT();
@@ -1473,11 +2225,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int32_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1490,11 +2259,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         float* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1507,11 +2293,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int64_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1524,11 +2327,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         double* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1541,11 +2361,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int8_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1558,11 +2395,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         int16_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1574,11 +2428,28 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         uint16_t* array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
         FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
     
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1591,16 +2462,38 @@ static Error_t interpret_bytecode(Thread_t* thread) {
 
         Object_t** array = NULL;
         int32_t length = 0;
-        FAIL_SET_JUMP(object, err, JERR_TYPECHECK_FAILURE, exit);
-        FAIL_SET_JUMP((err = heap_array_object_get_length(object, &length)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_array_object_get_elements(object, (void**)&array)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(object, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
 
         //Im starting to hate this fucking string shenanigans
         Class_t* items_class = NULL;
         FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(stringpool_get(object->class->name_id) + 1), &items_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP(class_is_compatible(value->class, items_class), err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP(class_is_compatible(value->class, items_class), err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayStoreException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
 
-        FAIL_SET_JUMP(index < length, err, JERR_TYPECHECK_FAILURE, exit);
+            (thread_throw_exception(thread, exception));  
+        }), exit);
+
+        FAIL_SET_JUMP(index < length, err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ArrayIndexOutOfBoundsException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));  
+        }), exit);
         array[index] = value;
 
         NEXT();
@@ -1628,6 +2521,513 @@ static Error_t interpret_bytecode(Thread_t* thread) {
         NEXT();
     }
 
+    EJOPCODE_MONITORENTER:{
+        FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - 1], thread)) == JERR_OK, err, err, exit);
+       
+        frame->sp--;
+        NEXT();
+    }
+
+    EJOPCODE_MONITOREXIT:{
+        FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
+        FAIL_SET_JUMP((Object_t*)frame->stack[frame->sp - 1], err, ({
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            (thread_throw_exception(thread, exception));            
+        }), exit);
+
+        FAIL_SET_JUMP(((err = monitor_exit(((Object_t*)frame->stack[frame->sp - 1])->monitor, thread)) == JERR_OK), err, err, exit);
+       
+        frame->sp--;
+        NEXT();
+    }
+
+    EJOPCODE_INSTANCEOF:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
+
+        Object_t* object = STACK_POP_REF(frame);
+        if(!object || (object && !class_is_compatible(object->class, sym->value))) STACK_PUSH_INT(frame, 0);
+        else STACK_PUSH_INT(frame, 1);
+
+        NEXT();
+    }
+
+    EJOPCODE_CHECKCAST:{
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
+        
+        Object_t* object = STACK_POP_REF(frame);
+        if(object && class_is_compatible(object->class, sym->value)) STACK_PUSH_REF(frame, object);
+        else {
+            Class_t* exception_class = NULL;
+            Object_t* exception = NULL; 
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/ClassCastException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+
+            return thread_throw_exception(thread, exception);
+        }
+
+        NEXT();
+    }
+
+    EJOPCODE_ATHROW:{
+        Object_t* exception = STACK_POP_REF(frame);
+        if(!exception){
+            Class_t* exception_class = NULL;
+            FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);  
+            FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
+        }
+
+        return thread_throw_exception(thread, exception);
+    }
+
+    EJOPCODE_NOP:
+        NEXT();
+
+    EJOPCODE_POP2: {
+        if (frame->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        frame->sp -= 2;
+        SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp);
+        SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp + 1);
+        NEXT();
+    }
+
+    EJOPCODE_DUP_X1: {
+        // ... v2, v1 -> ... v1, v2, v1
+        if (frame->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1; // v1
+        int idx2 = frame->sp - 2; // v2
+        int32_t v1 = frame->stack[idx1];
+        int32_t v2 = frame->stack[idx2];
+        int ref1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int ref2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        frame->sp++;
+        frame->stack[frame->sp - 3] = v1;
+        frame->stack[frame->sp - 2] = v2;
+        frame->stack[frame->sp - 1] = v1;
+        if (ref1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 3);
+        else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 3);
+        if (ref2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 2);
+        else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 2);
+        if (ref1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 1);
+        else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 1);
+        NEXT();
+    }
+
+    EJOPCODE_DUP_X2: {
+        if (frame->sp < 3) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1;
+        int idx2 = frame->sp - 2;
+        int idx3 = frame->sp - 3;
+        int32_t v1 = frame->stack[idx1];
+        int32_t v2 = frame->stack[idx2];
+        int32_t v3 = frame->stack[idx3];
+        int r1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int r2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        int r3 = SHADOW_GET_REF(frame->shadow_stack, idx3);
+        frame->sp++;
+        frame->stack[frame->sp - 4] = v1;
+        frame->stack[frame->sp - 3] = v3;
+        frame->stack[frame->sp - 2] = v2;
+        frame->stack[frame->sp - 1] = v1;
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 4); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 4);
+        if (r3) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 3); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 3);
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 2); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 2);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 1); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 1);
+        NEXT();
+    }
+
+    EJOPCODE_DUP2: {
+        // ... v2, v1 -> ... v2, v1, v2, v1
+        if (frame->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1;
+        int idx2 = frame->sp - 2;
+        int32_t v1 = frame->stack[idx1];
+        int32_t v2 = frame->stack[idx2];
+        int r1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int r2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        frame->sp += 2;
+        frame->stack[frame->sp - 4] = v2;
+        frame->stack[frame->sp - 3] = v1;
+        frame->stack[frame->sp - 2] = v2;
+        frame->stack[frame->sp - 1] = v1;
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 4); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 4);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 3); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 3);
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 2); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 2);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 1); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 1);
+        NEXT();
+    }
+
+    EJOPCODE_DUP2_X1: {
+        if (frame->sp < 3) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1;
+        int idx2 = frame->sp - 2;
+        int idx3 = frame->sp - 3;
+        int32_t v1 = frame->stack[idx1];
+        int32_t v2 = frame->stack[idx2];
+        int32_t v3 = frame->stack[idx3];
+        int r1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int r2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        int r3 = SHADOW_GET_REF(frame->shadow_stack, idx3);
+        frame->sp += 2;
+        frame->stack[frame->sp - 5] = v2;
+        frame->stack[frame->sp - 4] = v1;
+        frame->stack[frame->sp - 3] = v3;
+        frame->stack[frame->sp - 2] = v2;
+        frame->stack[frame->sp - 1] = v1;
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 5); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 5);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 4); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 4);
+        if (r3) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 3); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 3);
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 2); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 2);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 1); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 1);
+        NEXT();
+    }
+
+    EJOPCODE_DUP2_X2: {
+        if (frame->sp < 4) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1;
+        int idx2 = frame->sp - 2;
+        int idx3 = frame->sp - 3;
+        int idx4 = frame->sp - 4;
+        int32_t v1 = frame->stack[idx1];
+        int32_t v2 = frame->stack[idx2];
+        int32_t v3 = frame->stack[idx3];
+        int32_t v4 = frame->stack[idx4];
+        int r1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int r2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        int r3 = SHADOW_GET_REF(frame->shadow_stack, idx3);
+        int r4 = SHADOW_GET_REF(frame->shadow_stack, idx4);
+        frame->sp += 2;
+        frame->stack[frame->sp - 6] = v2;
+        frame->stack[frame->sp - 5] = v1;
+        frame->stack[frame->sp - 4] = v4;
+        frame->stack[frame->sp - 3] = v3;
+        frame->stack[frame->sp - 2] = v2;
+        frame->stack[frame->sp - 1] = v1;
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 6); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 6);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 5); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 5);
+        if (r4) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 4); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 4);
+        if (r3) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 3); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 3);
+        if (r2) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 2); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 2);
+        if (r1) SHADOW_SET_REF(frame->shadow_stack, frame->sp - 1); else SHADOW_CLEAR_REF(frame->shadow_stack, frame->sp - 1);
+        NEXT();
+    }
+
+    EJOPCODE_SWAP: {
+        if (frame->sp < 2) { err = JERR_TYPECHECK_FAILURE; goto exit; }
+        int idx1 = frame->sp - 1;
+        int idx2 = frame->sp - 2;
+        int32_t tmp = frame->stack[idx1];
+        frame->stack[idx1] = frame->stack[idx2];
+        frame->stack[idx2] = tmp;
+        int ref1 = SHADOW_GET_REF(frame->shadow_stack, idx1);
+        int ref2 = SHADOW_GET_REF(frame->shadow_stack, idx2);
+        if (ref2) SHADOW_SET_REF(frame->shadow_stack, idx1); else SHADOW_CLEAR_REF(frame->shadow_stack, idx1);
+        if (ref1) SHADOW_SET_REF(frame->shadow_stack, idx2); else SHADOW_CLEAR_REF(frame->shadow_stack, idx2);
+        NEXT();
+    }
+
+    EJOPCODE_INEG: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, -v);
+        NEXT();
+    }
+
+    EJOPCODE_LNEG: {
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, -v);
+        NEXT();
+    }
+
+    EJOPCODE_FNEG: {
+        float v = STACK_POP_FLOAT(frame);
+        STACK_PUSH_FLOAT(frame, -v);
+        NEXT();
+    }
+
+    EJOPCODE_DNEG: {
+        double v = STACK_POP_DOUBLE(frame);
+        STACK_PUSH_DOUBLE(frame, -v);
+        NEXT();
+    }
+
+    EJOPCODE_ISHL: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, v1 << (v2 & 0x1F));
+        NEXT();
+    }
+    EJOPCODE_ISHR: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, v1 >> (v2 & 0x1F));
+        NEXT();
+    }
+    EJOPCODE_IUSHR: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, (int32_t)((uint32_t)v1 >> (v2 & 0x1F)));
+        NEXT();
+    }
+
+    EJOPCODE_LSHL: {
+        int32_t shift = STACK_POP_INT(frame);
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, v << (shift & 0x3F));
+        NEXT();
+    }
+    EJOPCODE_LSHR: {
+        int32_t shift = STACK_POP_INT(frame);
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, v >> (shift & 0x3F));
+        NEXT();
+    }
+    EJOPCODE_LUSHR: {
+        int32_t shift = STACK_POP_INT(frame);
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, (int64_t)((uint64_t)v >> (shift & 0x3F)));
+        NEXT();
+    }
+
+    EJOPCODE_IAND: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, v1 & v2);
+        NEXT();
+    }
+    EJOPCODE_IOR: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, v1 | v2);
+        NEXT();
+    }
+    EJOPCODE_IXOR: {
+        int32_t v2 = STACK_POP_INT(frame);
+        int32_t v1 = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, v1 ^ v2);
+        NEXT();
+    }
+
+    EJOPCODE_LAND: {
+        int64_t v2 = STACK_POP_LONG(frame);
+        int64_t v1 = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, v1 & v2);
+        NEXT();
+    }
+    EJOPCODE_LOR: {
+        int64_t v2 = STACK_POP_LONG(frame);
+        int64_t v1 = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, v1 | v2);
+        NEXT();
+    }
+    EJOPCODE_LXOR: {
+        int64_t v2 = STACK_POP_LONG(frame);
+        int64_t v1 = STACK_POP_LONG(frame);
+        STACK_PUSH_LONG(frame, v1 ^ v2);
+        NEXT();
+    }
+
+    // int -> long, float, double
+    EJOPCODE_I2L: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_LONG(frame, (int64_t)v);
+        NEXT();
+    }
+    EJOPCODE_I2F: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_FLOAT(frame, (float)v);
+        NEXT();
+    }
+    EJOPCODE_I2D: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_DOUBLE(frame, (double)v);
+        NEXT();
+    }
+
+    // long -> int, float, double
+    EJOPCODE_L2I: {
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_INT(frame, (int32_t)v);
+        NEXT();
+    }
+    EJOPCODE_L2F: {
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_FLOAT(frame, (float)v);
+        NEXT();
+    }
+    EJOPCODE_L2D: {
+        int64_t v = STACK_POP_LONG(frame);
+        STACK_PUSH_DOUBLE(frame, (double)v);
+        NEXT();
+    }
+
+    // float -> int, long, double
+    EJOPCODE_F2I: {
+        float v = STACK_POP_FLOAT(frame);
+        STACK_PUSH_INT(frame, (int32_t)v);
+        NEXT();
+    }
+    EJOPCODE_F2L: {
+        float v = STACK_POP_FLOAT(frame);
+        STACK_PUSH_LONG(frame, (int64_t)v);
+        NEXT();
+    }
+    EJOPCODE_F2D: {
+        float v = STACK_POP_FLOAT(frame);
+        STACK_PUSH_DOUBLE(frame, (double)v);
+        NEXT();
+    }
+
+    // double -> int, long, float
+    EJOPCODE_D2I: {
+        double v = STACK_POP_DOUBLE(frame);
+        STACK_PUSH_INT(frame, (int32_t)v);
+        NEXT();
+    }
+    EJOPCODE_D2L: {
+        double v = STACK_POP_DOUBLE(frame);
+        STACK_PUSH_LONG(frame, (int64_t)v);
+        NEXT();
+    }
+    EJOPCODE_D2F: {
+        double v = STACK_POP_DOUBLE(frame);
+        STACK_PUSH_FLOAT(frame, (float)v);
+        NEXT();
+    }
+
+    // int -> byte, char, short (сужающие)
+    EJOPCODE_I2B: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, (int32_t)(int8_t)v);
+        NEXT();
+    }
+    EJOPCODE_I2C: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, (int32_t)(uint16_t)v);
+        NEXT();
+    }
+    EJOPCODE_I2S: {
+        int32_t v = STACK_POP_INT(frame);
+        STACK_PUSH_INT(frame, (int32_t)(int16_t)v);
+        NEXT();
+    }
+
+    EJOPCODE_LCMP: {
+        int64_t v2 = STACK_POP_LONG(frame);
+        int64_t v1 = STACK_POP_LONG(frame);
+        int32_t result;
+        if (v1 > v2) result = 1;
+        else if (v1 == v2) result = 0;
+        else result = -1;
+        STACK_PUSH_INT(frame, result);
+        NEXT();
+    }
+
+    EJOPCODE_FCMPL: {
+        float v2 = STACK_POP_FLOAT(frame);
+        float v1 = STACK_POP_FLOAT(frame);
+        int32_t result;
+        if (isnan(v1) || isnan(v2)) result = -1;
+        else if (v1 > v2) result = 1;
+        else if (v1 == v2) result = 0;
+        else result = -1;
+        STACK_PUSH_INT(frame, result);
+        NEXT();
+    }
+    EJOPCODE_FCMPG: {
+        float v2 = STACK_POP_FLOAT(frame);
+        float v1 = STACK_POP_FLOAT(frame);
+        int32_t result;
+        if (isnan(v1) || isnan(v2)) result = 1;
+        else if (v1 > v2) result = 1;
+        else if (v1 == v2) result = 0;
+        else result = -1;
+        STACK_PUSH_INT(frame, result);
+        NEXT();
+    }
+
+    EJOPCODE_DCMPL: {
+        double v2 = STACK_POP_DOUBLE(frame);
+        double v1 = STACK_POP_DOUBLE(frame);
+        int32_t result;
+        if (isnan(v1) || isnan(v2)) result = -1;
+        else if (v1 > v2) result = 1;
+        else if (v1 == v2) result = 0;
+        else result = -1;
+        STACK_PUSH_INT(frame, result);
+        NEXT();
+    }
+    EJOPCODE_DCMPG: {
+        double v2 = STACK_POP_DOUBLE(frame);
+        double v1 = STACK_POP_DOUBLE(frame);
+        int32_t result;
+        if (isnan(v1) || isnan(v2)) result = 1;
+        else if (v1 > v2) result = 1;
+        else if (v1 == v2) result = 0;
+        else result = -1;
+        STACK_PUSH_INT(frame, result);
+        NEXT();
+    }
+
+    EJOPCODE_IF_ACMPEQ: {
+        void* ref2 = STACK_POP_REF(frame);
+        void* ref1 = STACK_POP_REF(frame);
+        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        if (ref1 == ref2) {
+            frame->pc += offset;
+            goto *opcode_labels[*frame->pc];
+        }
+        NEXT();
+    }
+
+    EJOPCODE_IF_ACMPNE: {
+        void* ref2 = STACK_POP_REF(frame);
+        void* ref1 = STACK_POP_REF(frame);
+        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        if (ref1 != ref2) {
+            frame->pc += offset;
+            goto *opcode_labels[*frame->pc];
+        }
+        NEXT();
+    }
+
+    #define IF_ZERO(OP) do { \
+        int32_t v = STACK_POP_INT(frame); \
+        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)); \
+        if (v OP 0) { \
+            frame->pc += offset; \
+            goto *opcode_labels[*frame->pc]; \
+        } \
+        NEXT(); \
+    } while (0)
+
+    EJOPCODE_IFEQ:
+        IF_ZERO(==);
+
+    EJOPCODE_IFNE:
+        IF_ZERO(!=);
+
+    EJOPCODE_IFLT:
+        IF_ZERO(<);
+
+    EJOPCODE_IFGE:
+        IF_ZERO(>=);
+
+    EJOPCODE_IFGT:
+        IF_ZERO(>);
+
+    EJOPCODE_IFLE:
+        IF_ZERO(<=);
 
 exit:
     return err;

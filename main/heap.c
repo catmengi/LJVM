@@ -1,3 +1,22 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "heap.h"
 #include "bumper.h"
 #include "class.h"
@@ -53,6 +72,7 @@ Error_t heap_class_object_alloc(Class_t* class, Object_t** output){
     INIT_LIST_HEAD(&object->list);
     object->class = class;
     object->forward = 0;
+    object->ident = rand();
 
     *output = object;
 
@@ -73,6 +93,7 @@ Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** outpu
     INIT_LIST_HEAD(&object->list);
     object->class = class;
     object->forward = 0;
+    object->ident = rand();
 
     *(int32_t*)(((char*)object) + sizeof(*object)) = length;
     *output = object;
@@ -107,6 +128,10 @@ Error_t heap_array_object_get_elements(Object_t* object, void** output){
 
 exit:
     return err;
+}
+
+uint32_t heap_object_get_hashcode(Object_t* object){
+    return object->ident;
 }
 
 void heap_gc_thread_register(Thread_t* thread){
@@ -153,7 +178,7 @@ static void gc_scan_threads(struct list_head* output_list){
                     list_add_tail(&object->list, output_list);
                 }                
             }
-        }
+        }  
     }
 }
 
