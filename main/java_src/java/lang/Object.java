@@ -20,12 +20,12 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 package java.lang;
 
 public class Object{
-    public native void wait();
-    public native void wait(long millis);
-    public native void wait(long millis, int nanos);
+    public native final void wait();
+    public native final void wait(long millis);
+    public native final void wait(long millis, int nanos);
 
-    public native void notify();
-    public native void notifyAll();
+    public native final void notify();
+    public native final void notifyAll();
 
     public native int hashCode();
     public native final Class getClass();
@@ -33,6 +33,8 @@ public class Object{
     public boolean equals(Object obj){
         return this == obj;
     }
+
+    public String toString() {return null;}
 
 
 }

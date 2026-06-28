@@ -19,8 +19,14 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
+#define TARGET_LINUX
+//#define TARGET_ESPIDF
+
 #define KB * 1024
 #define MB * 1024 * 1024
+
+#define STRINGPOOL_SIZE 32768
+#define JAVASTRINGPOOL_SIZE 4096
 
 #define CLASS_PERMAMENT_ARENA 1 MB
 #define CLASS_TEMPOPARY_ARENA 256 KB

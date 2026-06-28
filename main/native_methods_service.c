@@ -24,8 +24,12 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <string.h>
 
 extern NativeClass_t java_lang_Object;
+extern NativeClass_t java_lang_System;
+extern NativeClass_t java_io_NativeOutputStream;
 static NativeClass_t* s_natives[] = {
     &java_lang_Object,
+    &java_lang_System,
+    &java_io_NativeOutputStream,
 };
 
 //Requires name in mangled form!

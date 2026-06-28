@@ -18,20 +18,42 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "monitor.h"
-#include "class.h"
 #include "config.h"
 #include "heap.h"
 #include "jerror.h"
 #include "thread.h"
-#include "stringpool.h"
 
-#include <assert.h>
+#include <limits.h>
+
+#ifdef TARGET_ESPIDF
+#include "freertos/freeRTOS.h"
+#include "freertos/sem.h"
+static SemaphoreHandle_t s_monitor_lock = NULL;
+#else
+#include <pthread.h>
+static pthread_mutex_t s_monitor_lock = {0};
+#endif
 
 static Monitor_t s_monitors[MAX_MONITORS] = {0};
-struct list_head s_free_monitors;
+static struct list_head s_free_monitors;
+static bool is_initialised = false;
 
-extern struct list_head* threads_get_sleep_list();
-extern struct list_head* threads_get_schedule_list();
+//=============== INTERNAL HELPERS ===============
+static void monitor_enter_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_lock(&s_monitor_lock);
+    #else
+    xSemaphoreTakeRecursive(s_monitor_lock, portMAX_DELAY);
+    #endif
+}
+
+static void monitor_exit_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_unlock(&s_monitor_lock);
+    #else
+    xSemaphoreGiveRecursive(s_monitor_lock);
+    #endif    
+}
 
 static void monitor_init(Monitor_t* monitor){
     monitor->owner = NULL;
@@ -40,8 +62,27 @@ static void monitor_init(Monitor_t* monitor){
     INIT_LIST_HEAD(&monitor->wait_set);
 }
 
+extern void thread_notify_wait();
+extern void thread_notify_timedwait(uint64_t ns);
+extern void thread_notify_send(Thread_t* thread);
+
+//==============================================
+
 void monitors_init(){
     INIT_LIST_HEAD(&s_free_monitors);
+
+    if(!is_initialised){
+        #ifdef TARGET_LINUX
+        pthread_mutexattr_t attr = {0};
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&s_monitor_lock, &attr);
+        #else
+        s_monitor_lock = xSemaphoreCreateRecursiveMutex();
+        assert(s_monitor_lock);
+        #endif
+        is_initialised = true;
+    }
 
     for(unsigned i = 0; i < MAX_MONITORS; i++){
         Monitor_t* monitor = &s_monitors[i];
@@ -52,193 +93,66 @@ void monitors_init(){
 }
 
 static Monitor_t* monitor_alloc(){
+    monitor_enter_critical();
+
     Monitor_t* unused = NULL;
     list_for_each_entry(unused, &s_free_monitors, list){
         list_del(&unused->list);
         monitor_init(unused);
+
+        monitor_exit_critical();
         return unused;
     }
 
+    monitor_exit_critical();
     return NULL;
 }
 
-Error_t monitor_enter(Object_t* object, Thread_t* thread){
-    if(!object){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL; 
-        assert(class_load_bynameid(stringpool_add("java/lang/IncompatibleClassChangeError"), &exception_class) == JERR_OK);
-        assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
-        assert(java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL) == JERR_OK); 
+Error_t monitor_enter(Object_t* object){
+    Thread_t* thread = thread_self_get();
 
-        return thread_throw_exception(thread, exception);            
-    }
+    if(!object) return JERR_NULLPOINTER;
 
     if(object->monitor == NULL){
         object->monitor = monitor_alloc();
         if(!object->monitor) return JERR_OOM;
     }
 
+    monitor_enter_critical();
+    
     Monitor_t* monitor = object->monitor;
     if(monitor->owner == NULL || monitor->owner == thread){
-        list_del_init(&monitor->list);
-        list_add(&monitor->list, &thread->top_frame->held_monitors);
+
+        if(monitor->recursion == 0){
+            list_del_init(&monitor->list);
+            list_add(&monitor->list, &thread->interpreter.frame->held_monitors);
+        }
 
         monitor->owner_object = object;
         monitor->owner = thread;
         monitor->recursion = thread->wake_recursion > 0 ? thread->wake_recursion : monitor->recursion + 1;
         thread->wake_recursion = 0;
+
+        monitor_exit_critical();
+        thread_safepoint_check();
         return JERR_OK;
     }
 
     list_del_init(&thread->list);
     list_add_tail(&thread->list, &monitor->enter_set);
 
-    return JERR_SCHEDULE;
+    monitor_exit_critical();
+    thread_notify_wait();
+
+    thread_safepoint_check();
+    return JERR_OK;
 }
 
-Error_t monitor_wait(Object_t* object, Thread_t* thread){
-    Error_t err = JERR_OK;
+Error_t monitor_exit(Monitor_t* monitor){
+    Thread_t* thread = thread_self_get();
 
-    Monitor_t* monitor = object->monitor;
-    if(monitor == NULL || monitor->owner != thread){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL;
-    
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalMonitorStateException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
-
-    list_del_init(&thread->list);
-    list_del_init(&thread->sleep_list); //If it was set somewhere - WTF????
-
-    thread->wake_recursion = monitor->recursion;
-    monitor->recursion = 0;
-    monitor->owner = NULL;
-    list_add(&thread->list, &monitor->wait_set);
-
-    return JERR_SCHEDULE;
-
-exit:
-    return err; //Bad return only 
-}
-
-extern uint64_t thread_time_ns_get();
-Error_t monitor_waitTimeout(Object_t* object, Thread_t* thread, int64_t timeout){
-    Error_t err = JERR_OK;
-
-    Monitor_t* monitor = object->monitor;
-    if(monitor == NULL || monitor->owner != thread){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL;
-    
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalMonitorStateException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
-
-    if(timeout < 0 || timeout > 999999){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL;
-    
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalArgumentException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
-
-    list_del_init(&thread->list);
-    list_del_init(&thread->sleep_list); //If it was set somewhere - WTF????
-
-    thread->wake_recursion = monitor->recursion;
-
-    monitor->recursion = 0;
-    monitor->owner = NULL;
-
-    if(timeout > 0){
-        thread->wakeup_on = timeout + thread_time_ns_get();
-        list_add(&thread->sleep_list, threads_get_sleep_list());
-    }
-
-    list_add(&thread->list, &monitor->wait_set);
-
-    return JERR_SCHEDULE;
-exit:
-    return err;
-}
-
-Error_t monitor_notify(Object_t* object, Thread_t* thread){
-    Error_t err = JERR_OK;
-
-    Monitor_t* monitor = object->monitor;
-    if(monitor == NULL || monitor->owner != thread){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL;
-    
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalMonitorStateException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
-    
-    Thread_t *to_notify = NULL, *tmp = NULL;
-    list_for_each_entry_safe(to_notify, tmp, &monitor->wait_set, list){
-        list_del_init(&to_notify->sleep_list);
-        list_del_init(&to_notify->list);
-
-        list_add_tail(&to_notify->list, &monitor->enter_set);
-        break;
-    }
-
-exit:
-    return err;
-}
-
-Error_t monitor_notifyAll(Object_t* object, Thread_t* thread){
-    Error_t err = JERR_OK;
-
-    Monitor_t* monitor = object->monitor;
-    if(monitor == NULL || monitor->owner != thread){
-        Class_t* exception_class = NULL;
-        Object_t* exception = NULL;
-    
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalMonitorStateException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
-    
-    Thread_t *to_notify = NULL, *tmp = NULL;
-    list_for_each_entry_safe(to_notify, tmp, &monitor->wait_set, list){
-        list_del_init(&to_notify->sleep_list);
-        list_del_init(&to_notify->list);
-
-        list_add_tail(&to_notify->list, &monitor->enter_set);
-    }
-
-exit:
-    return err;
-}
-
-Error_t monitor_exit(Monitor_t* monitor, Thread_t* thread){
-    Error_t err = JERR_OK;
-
-    if(monitor->owner != thread){
-        Object_t* exception = NULL;
-        Class_t* exception_class = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/IllegalMonitorStateException"), &exception_class)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = java_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL)) == JERR_OK, err, err, exit); 
-
-        return thread_throw_exception(thread, exception);
-    }
+    monitor_enter_critical();
+    if(monitor->owner != thread) return JERR_INVALIDMONITORSTATE;
 
     if(--monitor->recursion == 0){
         list_del_init(&monitor->list);
@@ -249,22 +163,148 @@ Error_t monitor_exit(Monitor_t* monitor, Thread_t* thread){
         Thread_t *wakeup = NULL, *tmp = NULL;
         list_for_each_entry_safe(wakeup, tmp, &monitor->enter_set, list){
             list_del_init(&wakeup->list);
-            list_add_tail(&wakeup->list, threads_get_schedule_list());
+            thread_notify_send(wakeup);
             break;
         }
     }
 
-exit:
-    return err;
+
+    monitor_exit_critical();
+    return JERR_OK;
+}
+
+Error_t monitor_exit_force(Monitor_t* monitor){
+    Thread_t* thread = thread_self_get();
+
+    monitor_enter_critical();
+    if(monitor->owner != thread) return JERR_INVALIDMONITORSTATE;
+
+    list_del_init(&monitor->list);
+    monitor->owner_object = NULL;
+    monitor->owner = NULL;
+
+
+    Thread_t *wakeup = NULL, *tmp = NULL;
+    list_for_each_entry_safe(wakeup, tmp, &monitor->enter_set, list){
+        list_del_init(&wakeup->list);
+        thread_notify_send(wakeup);
+    }
+
+
+    monitor_exit_critical();
+    return JERR_OK;    
+}
+
+Error_t monitor_wait(Object_t* object){
+    Thread_t* thread = thread_self_get();
+
+    if(!object) return JERR_NULLPOINTER;
+
+    monitor_enter_critical();
+
+    Monitor_t* monitor = object->monitor;
+    if(monitor == NULL || monitor->owner != thread){
+        monitor_exit_critical();
+        return JERR_INVALIDMONITORSTATE;
+    }
+
+
+    list_del_init(&thread->list);
+    list_del_init(&monitor->list); //Remove from held
+
+    thread->wake_recursion = monitor->recursion;
+    monitor->recursion = 0;
+    monitor->owner = NULL;
+
+    list_add(&thread->list, &monitor->wait_set);
+
+    monitor_exit_critical(); //Must release the lock, otherwise we are deeeply in trouble
+    thread_notify_wait();
+
+
+    return monitor_enter(object);
+}
+
+extern uint64_t thread_time_ns_get();
+Error_t monitor_waitTimeout(Object_t* object, int64_t timeout){
+    Thread_t* thread = thread_self_get();
+
+    if(!object) return JERR_NULLPOINTER;
+
+    Monitor_t* monitor = object->monitor;
+
+    monitor_enter_critical();
+    if(monitor == NULL || monitor->owner != thread){
+        monitor_exit_critical();
+        return JERR_INVALIDMONITORSTATE;
+    }
+
+
+    list_del_init(&thread->list);
+    list_del_init(&monitor->list); //Remove from held
+
+    thread->wake_recursion = monitor->recursion;
+
+    monitor->recursion = 0;
+    monitor->owner = NULL;
+
+    monitor_exit_critical(); //Must release the lock, otherwise we are deeeply in trouble
+
+    thread_notify_timedwait(timeout);
+
+    return monitor_enter(object);
+}
+
+Error_t monitor_notify(Object_t* object){
+    Thread_t* thread = thread_self_get();
+
+    if(!object) return JERR_NULLPOINTER;
+    
+    monitor_enter_critical();
+    Monitor_t* monitor = object->monitor;
+    if(monitor == NULL || monitor->owner != thread) return JERR_INVALIDMONITORSTATE;
+    
+    Thread_t *to_notify = NULL, *tmp = NULL;
+    list_for_each_entry_safe(to_notify, tmp, &monitor->wait_set, list){
+        list_del_init(&to_notify->list);
+        thread_notify_send(to_notify);
+        break;
+    }
+
+    monitor_exit_critical();
+    return JERR_OK;
+}
+
+Error_t monitor_notifyAll(Object_t* object){
+    Thread_t* thread = thread_self_get();
+
+    if(!object) return JERR_NULLPOINTER;
+
+    monitor_enter_critical();
+
+    Monitor_t* monitor = object->monitor;
+    if(monitor == NULL || monitor->owner != thread) return JERR_INVALIDMONITORSTATE;
+    Thread_t *to_notify = NULL, *tmp = NULL;
+    list_for_each_entry_safe(to_notify, tmp, &monitor->wait_set, list){
+        list_del_init(&to_notify->list);
+        thread_notify_send(to_notify);
+    }
+
+    monitor_exit_critical();
+    return JERR_OK;
 }
 
 void monitor_free(Object_t* object){
+    monitor_enter_critical();
+
     Monitor_t* monitor = object->monitor;
     object->monitor = NULL;
 
     if(monitor){
-        object->monitor = NULL;
+        monitor->owner_object = NULL;
         list_del_init(&monitor->list);
         list_add(&monitor->list, &s_free_monitors);
     }
+
+    monitor_exit_critical();
 }

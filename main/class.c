@@ -39,12 +39,49 @@ static ClassTable_t s_class_table = {0};
 static struct list_head s_class_list = {0};
 static bool s_initialised = false; //Reinit protection (VM reset in firmwares)
 
-#define JVM_CLASSPATH "java_src"
+//========================== PREEMTIVE SUPPORT 
+#ifdef TARGET_ESPIDF
+#include "freertos/freeRTOS.h"
+#include "freertos/sem.h"
+static SemaphoreHandle_t s_class_lock = NULL;
+#else
+#include <pthread.h>
+static pthread_mutex_t s_class_lock = {0};
+#endif
+
+static void class_enter_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_lock(&s_class_lock);
+    #else
+    xSemaphoreTakeRecursive(s_class_lock, portMAX_DELAY);
+    #endif
+}
+
+static void class_exit_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_unlock(&s_class_lock);
+    #else
+    xSemaphoreGiveRecursive(s_class_lock);
+    #endif    
+}
+
+//=================================================
 
 void classes_init(){
     INIT_LIST_HEAD(&s_class_list);
 
     if(!s_initialised){
+
+        #ifdef TARGET_LINUX
+        pthread_mutexattr_t attr = {0};
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&s_class_lock, &attr);
+        #else
+        s_class_lock = xSemaphoreCreateRecursiveMutex();
+        assert(s_class_lock);
+        #endif
+
         assert(bumper_create(&s_permament_arena, CLASS_PERMAMENT_ARENA) == 0);
         assert(bumper_create(&s_temporary_arena, CLASS_TEMPOPARY_ARENA) == 0);
         s_initialised = true;
@@ -100,6 +137,8 @@ exit:
     return retval;
 }
 
+
+
 Class_t* class_find(uint16_t name_id){
     ClassTableCalculatedIndex_t index = calculate_index(name_id);
 
@@ -114,6 +153,7 @@ Error_t class_insert(Class_t* class){
 
     INIT_LIST_HEAD(&class->list);
     list_add(&class->list, &s_class_list);
+    
     s_class_table.classes[index.index] = class;
 
 exit:
@@ -143,7 +183,8 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     Error_t err = JERR_OK;
     assert(out);
 
-    if((*out = class_find(name_id))) return JERR_OK;
+    class_enter_critical();
+    if((*out = class_find(name_id))) goto exit;
 
     char* string_name = stringpool_get(name_id);
     FAIL_SET_JUMP(string_name, err, JERR_BADPARAM, exit); //What the fuck did you just passed here?
@@ -184,6 +225,7 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     }
 
 exit:
+    class_exit_critical();
     return err;
 }
 
@@ -472,65 +514,77 @@ exit:
     return err;
 }
 
-static Error_t generate_method_locals_bitmap(const char* descriptor, bool is_virtual, uint32_t* bitmap){
-    Error_t err = JERR_OK;
-    
-    FAIL_SET_JUMP(descriptor, err, JERR_BADPARAM, exit);
-    
-    // Descriptor format: (param_types)return_type
-    // Examples: ()V, (II)I, (Ljava/lang/String;)V, ([I)Z
-    
-    if(*descriptor != '('){
+static Error_t generate_method_locals_bitmap(const char* descriptor,
+                                             bool is_virtual,
+                                             uint32_t* bitmap)
+{
+    if (!descriptor || *descriptor != '(')
         return JERR_BADPARAM;
-    }
-    descriptor++;
-    
-    if(is_virtual)
-        SHADOW_SET_REF(bitmap, 0);
-    unsigned index = is_virtual;
 
-    // Parse argument types
-    while(*descriptor != ')' && *descriptor != '\0'){
-        JavaValueType_t type;
-        
-        if(*descriptor == 'L'){
-            // Object type: Ljava/lang/String;
-            SHADOW_SET_REF(bitmap, index++);
-            descriptor = strchr(descriptor, ';');
-            if(!descriptor) return JERR_BADPARAM;
-            descriptor++;
-        }
-        else if(*descriptor == '['){
-            // Array type: [I, [Ljava/lang/String;, etc
-            SHADOW_SET_REF(bitmap, index++);
-            while(*descriptor == '[') descriptor++;
-            
-            if(*descriptor == 'L'){
-                descriptor = strchr(descriptor, ';');
-                if(!descriptor) return JERR_BADPARAM;
-                descriptor++;
-            }
-            else {
-                descriptor++;
-            }
-        }
-        else {
-            // Primitive type
-            if(*descriptor == TYPE_LONG || *descriptor == TYPE_DOUBLE)
-                index += 2;
-            else index++;
+    // start after '('
+    const char* p = descriptor + 1;
 
-            descriptor++;
-        }
-        
+    unsigned slot = 0;
+
+    // 'this' for virtual methods
+    if (is_virtual) {
+        SHADOW_SET_REF(bitmap, slot);
+        slot++;
     }
-    
-    if(*descriptor != ')'){
+
+    // parameter list
+    while (*p && *p != ')') {
+        switch (*p) {
+            case 'B':
+            case 'C':
+            case 'F':
+            case 'I':
+            case 'S':
+            case 'Z':
+                slot += 1;
+                p++;
+                break;
+
+            case 'D':
+            case 'J':
+                slot += 2;
+                p++;
+                break;
+
+            case 'L':
+                // reference type: set ref bit, skip to ';'
+                SHADOW_SET_REF(bitmap, slot);
+                slot++;
+                p = strchr(p, ';');
+                if (!p) return JERR_BADPARAM;
+                p++;   // move past ';'
+                break;
+
+            case '[':
+                // array type: set ref bit, then skip element type
+                SHADOW_SET_REF(bitmap, slot);
+                slot++;
+                p++;   // skip '['
+                while (*p == '[') p++;   // multi-dim array
+                if (*p == 'L') {
+                    p = strchr(p, ';');
+                    if (!p) return JERR_BADPARAM;
+                    p++;
+                } else {
+                    p++;  // primitive element
+                }
+                break;
+
+            default:
+                return JERR_BADPARAM;
+        }
+    }
+
+    if (*p != ')')
         return JERR_BADPARAM;
-    }
-    
-exit:
-    return err;
+
+    // return type not needed for locals bitmap
+    return JERR_OK;
 }
 
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
@@ -631,7 +685,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         snprintf(mangled_name, mangled_len, "%s@%s", raw_field_name_cstr, raw_field_descriptor_cstr);
 
         field->class = this_class;
-        field->type = raw_field_descriptor_utf8->string[0];
+        field->type = raw_field_descriptor_utf8->string[0] == '[' ? TYPE_REFERENCE : raw_field_descriptor_utf8->string[0];
         field->offset = offsets[is_static];
         field->flags.is_static = is_static;
         field->size = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
@@ -680,6 +734,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->flags.is_public = (raw_method->flags & ACC_PUBLIC) == ACC_PUBLIC;
         method->flags.is_private = (raw_method->flags & ACC_PRIVATE) == ACC_PRIVATE;
         method->flags.is_protected = (raw_method->flags & ACC_PROTECTED) == ACC_PROTECTED;
+        method->flags.is_abstract = (raw_method->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
 
         method->flags.is_static = is_static;
         method->flags.is_virtual = !(is_static || is_special);
@@ -712,6 +767,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->args_slots += !method->flags.is_static;
         method->args_bitmap_size = (method->args_slots + 31) / 32; //32 bits in uint32_t.......
         FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(&s_permament_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
+       
         FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, !method->flags.is_static, method->args_bitmap)) == JERR_OK, err, err, exit); 
 
         if(method->flags.is_native){
@@ -833,7 +889,7 @@ static Error_t class_find_imethod(Class_t* class, uint16_t name_id, uint16_t* in
     return JERR_NOTFOUND;
 }
 
-static Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
+Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
     for(unsigned i = 0; i < class->static_fields.count; i++){
         Field_t* field = &class->static_fields.fields[i];
         if(field->name_id == name_id)
@@ -842,7 +898,7 @@ static Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
-static Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
+Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
     for(unsigned i = 0; i < class->instance_fields.count; i++){
         Field_t* field = &class->instance_fields.fields[i];
         if(field->name_id == name_id)
@@ -851,10 +907,12 @@ static Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
+Error_t jstringpool_get(uint16_t name_id, Object_t** output);
 Error_t class_resolv_symbol(ClassSymbol_t* symbol){
     Error_t err = JERR_OK;
 
-    if(symbol->type < PROXY_SYMBOL_CLASS) return JERR_OK;
+    class_enter_critical();
+    if(symbol->type < PROXY_SYMBOL_CLASS) goto exit;
 
     ClassProxySymbol_t* proxy_symbol = symbol->value;
     
@@ -872,18 +930,37 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
             symbol->type = SYMBOL_FIELD;
             symbol->value = (symbol->value = class_find_static_field(origin, proxy_symbol->self_name_id)) ? 
                             symbol->value : class_find_instance_field(origin, proxy_symbol->self_name_id);
-            FAIL_SET_JUMP(symbol->value, err, JERR_NOTFOUND, exit);
+            FAIL_SET_JUMP(symbol->value, err, JERR_NOSUCHFIELD, exit);
+
+            Field_t* field = symbol->value;
+            if(!field->flags.is_public){
+                if(field->flags.is_protected){
+                    FAIL_SET_JUMP(class_is_subclass(thread_self_get()->interpreter.frame->method->class, field->class), err, JERR_ILLEGALACCESS, exit);
+                } else if(field->flags.is_private){
+                    FAIL_SET_JUMP(thread_self_get()->interpreter.frame->method->class == field->class, err, JERR_ILLEGALACCESS, exit);
+                }
+            }
         }
         break;
 
         case PROXY_SYMBOL_METHOD:{
             symbol->type = SYMBOL_METHOD;
-            FAIL_SET_JUMP((symbol->value = class_find_method(origin, proxy_symbol->self_name_id)), err, JERR_NOTFOUND, exit);
+            FAIL_SET_JUMP((symbol->value = class_find_method(origin, proxy_symbol->self_name_id)), err, JERR_NOSUCHMETHOD, exit);
+
+            Method_t* method = symbol->value;
+            if(!method->flags.is_public){
+                if(method->flags.is_protected){
+                    FAIL_SET_JUMP(class_is_subclass(thread_self_get()->interpreter.frame->method->class, method->class), err, JERR_ILLEGALACCESS, exit);
+                } else if(method->flags.is_private){
+                    FAIL_SET_JUMP(thread_self_get()->interpreter.frame->method->class == method->class, err, JERR_ILLEGALACCESS, exit);
+                }
+            }
         }
         break;
 
         case PROXY_SYMBOL_STRING:{
-            assert(0 && "TODO: string support!");
+            FAIL_SET_JUMP((err = jstringpool_get(proxy_symbol->self_name_id, (Object_t**)&symbol->value)) == JERR_OK, err, err, exit);
+            symbol->type = SYMBOL_STRING;
         }
         break;
 
@@ -891,6 +968,7 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
     }
 
 exit:
+    class_exit_critical();
     return err;
 }
 
@@ -948,9 +1026,6 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
         }
     } else this_class->vtable_size = 0;
 
-    this_class->flags.is_linked = 1;
-
-
     //Finally fix interfaces
     for(unsigned i = 0; i < this_class->implements.count; i++){
         Implementation_t* implementation = &this_class->implements.implementations[i];
@@ -973,10 +1048,8 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
         }
     }
 
-    this_class->metadata = NULL;
-
     Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
-    FAIL_SET_JUMP(!clinit || (err = java_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP(!clinit || (err = interpreter_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
 
     Field_t* nativeClassPointer_field = NULL;
     Class_t* jlClass = NULL;
@@ -985,12 +1058,13 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
     int32_t* fields = NULL;
-    FAIL_SET_JUMP((err = heap_class_object_get_fields(jlClass, &fields)) == JERR_OK, err, err, exit);
-
+    FAIL_SET_JUMP((err = heap_class_object_get_fields(this_class->class_object, &fields)) == JERR_OK, err, err, exit);
     fields[nativeClassPointer_field->offset] = (int32_t)this_class;
 
+    this_class->metadata = NULL;
+    this_class->flags.is_linked = 1;
 exit:
-    return 0;
+    return err;
 }
 
 static Error_t class_link(Class_t* class){

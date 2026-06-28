@@ -127,6 +127,7 @@ typedef struct Method_t{
                 unsigned is_public:1;
                 unsigned is_protected:1;
                 unsigned is_private:1;
+                unsigned is_abstract:1;
             };
         };
     }flags; 
@@ -266,14 +267,12 @@ typedef struct{
 
 void classes_init(); //Not to be called by user!
 
-Class_t* class_find(uint16_t name_id);
-Error_t class_insert(Class_t* klass);
-
 Error_t class_resolv_symbol(ClassSymbol_t* symbol);
-
-//ALARM: it does loading AND linking
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);
 bool class_is_subclass(Class_t* is_subclass, Class_t* to);
+
+Field_t* class_find_static_field(Class_t* class, uint16_t name_id);
+Field_t* class_find_instance_field(Class_t* class, uint16_t name_id);

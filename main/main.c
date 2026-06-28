@@ -18,6 +18,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "config.h"
+#include "monitor.h"
 #include "stringpool.h"
 #include "class.h"
 #include "thread.h"
@@ -26,9 +27,15 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "loader.h"
 
 
-Thread_t* thread_alloc();
-void thread_free(Thread_t* thread);
-void thread_sleep(Thread_t* thread, uint32_t ms);
+void thread_preinit(){
+    Class_t* main_class = NULL;
+    assert(class_load_bynameid(stringpool_add("JEspressoTest"), &main_class) == JERR_OK);
+
+    Method_t* main = class_find_method(main_class, stringpool_add("debug@()V"));
+    assert(main);
+
+    thread_self_get()->startup_args[THREAD_ARG_METHOD] = main;
+}
 
 int app_main(){
     JEspresso_init();
@@ -36,23 +43,14 @@ int app_main(){
     loader_set_apppath("java_src");
     loader_set_systempath("java_src");
 
-    Class_t* out = NULL;
-    assert(class_load_bynameid(stringpool_add("JEspressoTest"), &out) == JERR_OK);
+    for(unsigned i = 0; i < 2; i++){
+        Thread_t* thread = thread_alloc();
+        thread->init = thread_preinit;
+        thread_start(thread, NULL, NULL);
+    }
+    //assert(thread_schedule() == JERR_OK);
 
-    Method_t* runConsumer = class_find_method(out, stringpool_add("runConsumer@()V"));
-    Method_t* runProducer = class_find_method(out, stringpool_add("runProducer@()V"));
-
-
-    thread_start(thread_alloc(),runProducer, (int32_t[]){});
-    thread_start(thread_alloc(),runConsumer, (int32_t[]){});
-
-    assert(thread_schedule() == JERR_OK);
- 
-    thread_start(thread_alloc(),runConsumer, (int32_t[]){});
-    thread_start(thread_alloc(),runProducer, (int32_t[]){});
-
-    assert(thread_schedule() == JERR_OK);
-
+    pthread_exit(NULL);
     return 0;
 }
 

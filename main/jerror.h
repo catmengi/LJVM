@@ -23,14 +23,27 @@ typedef enum{
     JERR_OK,
     JERR_OOM,
     JERR_BADPARAM,
-    JERR_UNKNOWN,
     JERR_NOTFOUND,
-    JERR_NOCLASSDEF,
-    JERR_SCHEDULE, //Not a error, but rather a interpreter's saying to scheduler loop that it exited but thread must still be alive
-    JERR_EXCEPTION, //Way of saying from native method that interpreter must take exception from retval
-    JERR_ORPHAN_RETURN, //Interpreter way of saing that root method non void returned! (error)
+    JERR_ORPHAN_RETURN,
     JERR_TYPECHECK_FAILURE,
     JERR_UNHANDLED_EXCEPTION,
+
+    //Exception-generating errors:
+    JERR_NOCLASSDEF,
+    JERR_INVALIDMONITORSTATE,
+    JERR_NULLPOINTER,
+    JERR_NOSUCHFIELD,
+    JERR_NOSUCHMETHOD,
+    JERR_ABSTRACT,
+    JERR_ILLEGALACCESS,
+    JERR_EXCEPTION, //Made interpreter throw exception object from stack top
+    JERR_INCOMPATIBLECLASSCHANGE,
+    JERR_INSTANTIATION,
+    JERR_NEGATIVESIZE,
+    JERR_INDEXOOB,
+    JERR_CAST,
+
+    JERR_UNKNOWN,
 }Error_t;
 
 #define __FSJ_DO_BREAK__
@@ -38,7 +51,7 @@ typedef enum{
 //This macro is not entriely means error, it might used for better looking error code propagation (JERR_SCHEDULE is one of the examples)
 #ifdef __FSJ_DO_BREAK__
     static void FSJ_BREAK(){}
-    #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); if((value) != (int)JERR_SCHEDULE) {printf("%s:%d ERROR HAPPENED, CODE: %d\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); FSJ_BREAK();} goto label;}}
+    #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); printf("%s:%d ERROR HAPPENED, CODE: %d\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); FSJ_BREAK(); goto label;}}
 #else
     #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); goto label;}}
 #endif

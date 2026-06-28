@@ -37,12 +37,13 @@ typedef struct Monitor_t{
 
 void monitors_init();
 
-Error_t monitor_enter(Object_t* object, Thread_t* thread);
-Error_t monitor_exit(Monitor_t* monitor, Thread_t* thread);
+Error_t monitor_enter(Object_t* object);
+Error_t monitor_exit(Monitor_t* monitor);
+Error_t monitor_exit_force(Monitor_t* monitor);
 
-Error_t monitor_wait(Object_t* object, Thread_t* thread);
-Error_t monitor_waitTimeout(Object_t* object, Thread_t* thread, int64_t timeout);
-Error_t monitor_notify(Object_t* object, Thread_t* thread);
-Error_t monitor_notifyAll(Object_t* object, Thread_t* thread);
+Error_t monitor_wait(Object_t* object);
+Error_t monitor_waitTimeout(Object_t* object,int64_t timeout);
+Error_t monitor_notify(Object_t* object);
+Error_t monitor_notifyAll(Object_t* object);
 
 void monitor_free(Object_t* object);

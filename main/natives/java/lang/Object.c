@@ -24,31 +24,22 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <assert.h>
 
 static NativeMethodReturnValue_t wait(Thread_t* thread, Method_t* self, int32_t* args){
-    Error_t err = JERR_UNKNOWN;
-
-    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_wait((Object_t*)args[0], thread)};
-    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+    return (NativeMethodReturnValue_t){monitor_wait((Object_t*)args[0]), {0}};
 }
 static NativeMethodReturnValue_t waitMillis(Thread_t* thread, Method_t* self, int32_t* args){
-    Error_t err = JERR_UNKNOWN;
-
-    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], thread, *(int64_t*)&args[1])};
-    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+    return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], *(int64_t*)&args[1]), {0}};
 }
 
 static NativeMethodReturnValue_t waitMillisNanos(Thread_t* thread, Method_t* self, int32_t* args){
-    Error_t err = JERR_UNKNOWN;
-
-    if(thread->wake_recursion == 0) return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], thread, *(int64_t*)&args[1] + args[3])};
-    else return (NativeMethodReturnValue_t){monitor_enter((Object_t*)args[0], thread)};
+    return (NativeMethodReturnValue_t){monitor_waitTimeout((Object_t*)args[0], *(int64_t*)&args[1] + args[3]), {0}};
 }
 
 static NativeMethodReturnValue_t notify(Thread_t* thread, Method_t* self, int32_t* args){
-    return (NativeMethodReturnValue_t){monitor_notify((Object_t*)args[0], thread)};
+    return (NativeMethodReturnValue_t){monitor_notify((Object_t*)args[0]), {0}};
 }
 
 static NativeMethodReturnValue_t notifyAll(Thread_t* thread, Method_t* self, int32_t* args){
-    return (NativeMethodReturnValue_t){monitor_notifyAll((Object_t*)args[0], thread)};
+    return (NativeMethodReturnValue_t){monitor_notifyAll((Object_t*)args[0]), {0}};
 }
 
 static NativeMethodReturnValue_t hashCode(Thread_t* thread, Method_t* self, int32_t* args){

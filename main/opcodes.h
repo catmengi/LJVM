@@ -286,7 +286,7 @@ typedef enum {
     EJOPCODE_BREAKPOINT     = 0xca,
 
     // 0xcb-0xfd are unused
-    EJOPCODE_IMPDEP1        = 0xfe,
+    EJOPCODE_INTERPRETEREXIT        = 0xfe,
     EJOPCODE_IMPDEP2        = 0xff
 }JOpcode_t;
 

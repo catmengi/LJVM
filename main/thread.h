@@ -21,9 +21,19 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include "bumper.h"
 #include "config.h"
+#include "interpreter.h"
 #include "list.h"
 #include "jerror.h"
 #include "monitor.h"
+
+#include <stdbool.h>
+
+#ifdef TARGET_ESPIDF
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#else
+#include <pthread.h>
+#endif
 
 #include <stdint.h>
 
@@ -53,38 +63,47 @@ typedef struct CallFrame_t{
     CallFrame_t* prev;
 }CallFrame_t;
 
-/*typedef enum{
-    THREAD_PSEUDO,
-    THREAD_ACTIVE,
-}ThreadState_t;*/
+enum{
+    THREAD_ARG_SELF = 0,
+    THREAD_ARG_METHOD = 1,
+    THREAD_ARG_ARGS = 2,
+
+    THREAD_ARG_MAX,
+};
 
 typedef struct Thread_t{
-    struct list_head list;
-    struct list_head sleep_list; //Hack for future Object.wait() with timeout
-    struct list_head gc_list;
+    struct list_head list; //List used for monitor operations / safepoint waiting / waiting for thread exit (join)
     struct list_head joiners; //List of threads that want to join us
+    struct list_head gc_list; //required for GC scanning
+    void* startup_args[THREAD_ARG_MAX]; //Startup arguments array (thread_start want so pass them somehow + init() can modify them)
 
-    //ThreadState_t state;
-    int opcode_quota;
+    #ifdef TARGET_ESPIDF
+    TaskHandle_t task;
+    #else
+    pthread_t task;
+    pthread_mutex_t notify_mutex;
+    pthread_cond_t notify_condvar;
+    #endif
+
+    Interpreter_t interpreter;
     unsigned wake_recursion; //if 0 then thread is NOT in waiting state
 
-    bump_allocator_t frame_allocator; //Initialised on VM startup
-    CallFrame_t* top_frame;
-
-    uint64_t wakeup_on; //Time when thread should wakeup if in sleep list
-    char stackbuf[THREAD_STACK_SIZE];   
+    void (*init)(); //Put here to make VM startup possible, since all API's now using current thread
+    //void (*exit)();
 }Thread_t;
 
 
 typedef struct Object_t Object_t;
-void threads_init();
 
-Error_t thread_schedule();
+Thread_t* thread_self_get();
 Thread_t* thread_alloc();
 
 void thread_start(Thread_t* thread, Method_t* method, int32_t* args);
-void thread_kill(Thread_t* thread);
-void thread_sleep(Thread_t* thread, uint32_t ms);
+void thread_kill();
+void thread_sleep(uint32_t ms);
 
-Error_t thread_throw_exception(Thread_t* thread, Object_t* exception_object);
-Error_t java_method_invoke(Method_t* method, int32_t* arguments, void* return_value);
+uint64_t thread_time_ns_get();
+
+void thread_safepoint_request();
+void thread_safepoint_check();
+void thread_safepoint_release();

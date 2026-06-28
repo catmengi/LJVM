@@ -21,6 +21,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "bumper.h"
 #include "class.h"
 #include "config.h"
+#include "interpreter.h"
 #include "jerror.h"
 #include "list.h"
 #include "thread.h"
@@ -29,11 +30,22 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <stdatomic.h>
 
+#ifdef TARGET_ESPIDF
+#include "freertos/freeRTOS.h"
+#include "freertos/sem.h"
+static SemaphoreHandle_t s_heap_lock = NULL;
+#else
+#include <pthread.h>
+static pthread_mutex_t s_heap_lock = {0};
+#endif
 
+static atomic_bool s_gc_running = false;
 static struct list_head s_gc_thread_list;
 static bump_allocator_t s_gc_heap = {0};
 static bool is_initialised = false;
+
 static int value_type_size[] = {
     [TYPE_VOID] = 0,
     [TYPE_BYTE] = sizeof(int8_t),
@@ -47,24 +59,58 @@ static int value_type_size[] = {
     [TYPE_REFERENCE] = sizeof(Object_t*),
 };
 
+static void heap_enter_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_lock(&s_heap_lock);
+    #else
+    xSemaphoreTakeRecursive(s_heap_lock, portMAX_DELAY);
+    #endif
+}
+
+static void heap_exit_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_unlock(&s_heap_lock);
+    #else
+    xSemaphoreGiveRecursive(s_heap_lock);
+    #endif    
+}
 
 void heap_init(){
     INIT_LIST_HEAD(&s_gc_thread_list);
-    
     if(!is_initialised){
+
+        #ifdef TARGET_LINUX
+        pthread_mutexattr_t attr = {0};
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&s_heap_lock, &attr);
+        #else
+        s_heap_lock = xSemaphoreCreateRecursiveMutex();
+        assert(s_heap_lock);
+        #endif
+    
         assert(bumper_create(&s_gc_heap, OBJECT_HEAP_SIZE) == 0);
         is_initialised = true;
     } else bumper_reset(&s_gc_heap);
 }
 
+int heap_array_type_size(JavaValueType_t type){
+    return value_type_size[type];
+}
+
 Error_t heap_class_object_alloc(Class_t* class, Object_t** output){
     Error_t err = JERR_OK;
+    heap_enter_critical();
 
     FAIL_SET_JUMP(class->flags.is_abstract == 0 && class->flags.is_interface == 0, err, JERR_TYPECHECK_FAILURE, exit);
     FAIL_SET_JUMP(class->flags.is_array == 0, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
 
-    if(sizeof(Object_t) + class->object_size > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))) heap_gc_start();
+    if(sizeof(Object_t) + class->object_size > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))){
+        heap_exit_critical();
+        heap_gc_start();
+        heap_enter_critical();
+    }
 
     Object_t* object = NULL;
     FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + class->object_size)), err, JERR_OOM, exit);
@@ -77,15 +123,23 @@ Error_t heap_class_object_alloc(Class_t* class, Object_t** output){
     *output = object;
 
 exit:
+    heap_exit_critical();
     return err;
 }
 
 Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** output){
     Error_t err = JERR_OK;
+    heap_enter_critical();
 
     FAIL_SET_JUMP(class->flags.is_array == 1, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(length >= 0, err, JERR_BADPARAM, exit);
+
+    if(sizeof(Object_t) + sizeof(int32_t) + value_type_size[class->array_type] * length > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))){
+        heap_exit_critical();
+        heap_gc_start();
+        heap_enter_critical();
+    }
 
     Object_t* object = NULL;
     FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + sizeof(int32_t) + (value_type_size[class->array_type] * length))), err, JERR_OOM, exit);
@@ -97,7 +151,9 @@ Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** outpu
 
     *(int32_t*)(((char*)object) + sizeof(*object)) = length;
     *output = object;
+
 exit:
+    heap_exit_critical();
     return err;
 }
 
@@ -146,7 +202,7 @@ void heap_gc_thread_unregister(Thread_t* thread){
 static void gc_scan_threads(struct list_head* output_list){
     Thread_t* thread = NULL;
     list_for_each_entry(thread, &s_gc_thread_list, gc_list){
-        for(CallFrame_t* cur = thread->top_frame; cur; cur = cur->prev){
+        for(InterpreterFrame_t* cur = thread->interpreter.frame; cur; cur = cur->prev){
             for(unsigned i = 0; i < cur->sp; i++){
                 if(SHADOW_GET_REF(cur->shadow_stack, i)){
                     Object_t* object = (Object_t*)cur->stack[i];
@@ -222,12 +278,29 @@ static void gc_scan_classes(struct list_head* output_list){
     }
 }
 
+#include "jstringpool.h"
+JavaStringPoolEntry_t* jstringpool_get_pool();
+
+static void gc_scan_jstringpool(struct list_head* output_list){
+    JavaStringPoolEntry_t* jstringpool = jstringpool_get_pool();
+    for(unsigned i = 0; i < JAVASTRINGPOOL_SIZE; i++){
+        JavaStringPoolEntry_t* entry = &jstringpool[i];
+
+        Object_t* object = entry->object;
+        if(object && object->forward != GC_MARK_SENTINEL){
+            object->forward = GC_MARK_SENTINEL;
+            INIT_LIST_HEAD(&object->list);
+            list_add_tail(&object->list, output_list);
+        }           
+    }
+}
 
 static void gc_scan(){
     LIST_HEAD(root_list);
 
     gc_scan_classes(&root_list);
     gc_scan_threads(&root_list);
+    gc_scan_jstringpool(&root_list);
 
     Object_t *object = NULL, *tmp = NULL;
 
@@ -309,7 +382,7 @@ static void gc_patch(struct list_head* live_list){
     //Thread patching phase ====
     Thread_t* thread = NULL;
     list_for_each_entry(thread, &s_gc_thread_list, gc_list){
-        for(CallFrame_t* cur = thread->top_frame; cur; cur = cur->prev){
+        for(InterpreterFrame_t* cur = thread->interpreter.frame; cur; cur = cur->prev){
             for(unsigned i = 0; i < cur->sp; i++){
                 if(SHADOW_GET_REF(cur->shadow_stack, i)){
                     Object_t* object = (Object_t*)cur->stack[i];
@@ -406,6 +479,18 @@ static void gc_patch(struct list_head* live_list){
         }
     }
     //=====================
+
+    //Patch jstringpool
+    JavaStringPoolEntry_t* jstringpool = jstringpool_get_pool();
+    for(unsigned i = 0; i < JAVASTRINGPOOL_SIZE; i++){
+        JavaStringPoolEntry_t* entry = &jstringpool[i];
+
+        Object_t* object = entry->object;
+        if(object && object->forward != GC_MARK_SENTINEL){
+            entry->object = object->forward;
+        }           
+    }
+    //=====================
 }
 
 static void gc_move(struct list_head* live_list){
@@ -424,11 +509,19 @@ static void gc_move(struct list_head* live_list){
     memset(s_gc_heap.last_end, 0, bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap));
 }
 
+extern void thread_notify_send(Thread_t* thread);
 void heap_gc_start(){
+    thread_safepoint_check();
+    thread_safepoint_request();
+    heap_enter_critical();
+
     gc_scan();
 
     LIST_HEAD(live_list);
     s_gc_heap.last_end = gc_calculate_forwards(&live_list);
     gc_patch(&live_list);
     gc_move(&live_list);
+
+    heap_exit_critical();
+    thread_safepoint_release();
 }

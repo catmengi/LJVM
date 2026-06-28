@@ -17,12 +17,11 @@ You should have received a copy of the GNU General Public License
 along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+//Helper for maintaining internal intern pool of java.lang.String()
 
-#include <stdint.h>
-#include "config.h"
+#include "heap.h"
 
-
-void stringpool_init();
-int stringpool_add(char* string);
-char* stringpool_get(int index);
+typedef struct{
+    uint16_t name_id; //C string name id
+    Object_t* object;
+}JavaStringPoolEntry_t;
