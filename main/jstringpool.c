@@ -27,8 +27,46 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <assert.h>
 
 static JavaStringPoolEntry_t s_stringpool[JAVASTRINGPOOL_SIZE] = {0};
+static bool is_initialised = false;
+
+#ifdef TARGET_ESPIDF
+#include "freertos/freeRTOS.h"
+#include "freertos/sem.h"
+static SemaphoreHandle_t s_jstringpool_lock = NULL;
+#else
+#include <pthread.h>
+static pthread_mutex_t s_jstringpool_lock = {0};
+#endif
+
+static void jstringpool_enter_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_lock(&s_jstringpool_lock);
+    #else
+    xSemaphoreTakeRecursive(s_jstringpool_lock, portMAX_DELAY);
+    #endif
+}
+
+static void jstringpool_exit_critical(){
+    #ifdef TARGET_LINUX
+    pthread_mutex_unlock(&s_jstringpool_lock);
+    #else
+    xSemaphoreGiveRecursive(s_jstringpool_lock);
+    #endif    
+}
 
 void jstringpool_init(){
+    if(!is_initialised){
+        #ifdef TARGET_LINUX
+        pthread_mutexattr_t attr = {0};
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&s_jstringpool_lock, &attr);
+        #else
+        s_jstringpool_lock = xSemaphoreCreateRecursiveMutex();
+        assert(s_jstringpool_lock);
+        #endif
+        is_initialised = true;
+    }
     memset(s_stringpool, 0, sizeof(s_stringpool));
 }
 
@@ -84,6 +122,7 @@ exit:
 //Hack to properly intern java strings beetween classes
 Error_t jstringpool_get(uint16_t name_id, Object_t** output){
     Error_t err = JERR_OK;
+    jstringpool_enter_critical();
 
     CalculatedIndex_t index = calculate_index(name_id);
     if(index.flags.is_found == 0 && index.flags.is_error == 0){
@@ -121,11 +160,14 @@ Error_t jstringpool_get(uint16_t name_id, Object_t** output){
         s_stringpool[index.index].name_id = name_id;
         s_stringpool[index.index].object = String;
         *output = String;
-
     } else if(index.flags.is_found){
         *output = s_stringpool[index.index].object;
-    } else return JERR_OOM;
+    } else {
+        err = JERR_OOM;
+        goto exit;
+    }
 
 exit:
+    jstringpool_exit_critical();
     return err;
 }
