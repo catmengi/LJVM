@@ -18,19 +18,29 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "class.h"
+#include "config.h"
 #include "parser.h"
 #include "stringpool.h"
 #include "interpreter.h"
 #include "heap.h"
 #include "monitor.h"
+#include "memman.h"
+#include "classtable.h"
 
-extern void jstringpool_init();
+#include <assert.h>
+
 void JEspresso_init(){
+    memman_init();
+    assert(memman_create(VM_PERMA_ARENA_ID, VM_PERMA_ARENA_SIZE));
+    assert(memman_create(VM_LINKER_TMP_ARENA_ID, VM_LINKER_TMP_ARENA_SIZE));
+    assert(memman_create(VM_GC_ARENA_ID, VM_GC_ARENA_SIZE));
+    assert(memman_create(VM_PARSER_ARENA_ID, VM_PARSER_ARENA_SIZE));
+
     stringpool_init();
     parser_init();
     monitors_init();
     heap_init();
-    jstringpool_init();
+    classtable_init();
     classes_init();
     interpreter_init();
 }

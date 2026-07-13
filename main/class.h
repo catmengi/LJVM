@@ -24,6 +24,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "list.h"
 #include "jerror.h"
 #include "monitor.h"
+#include "interpreter.h"
 
 #define MAX_LOADED_CLASSES 1024
 typedef struct Class_t Class_t;
@@ -267,8 +268,8 @@ typedef struct{
 
 void classes_init(); //Not to be called by user!
 
-Error_t class_resolv_symbol(ClassSymbol_t* symbol);
-Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
+Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol);
+Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out);
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);

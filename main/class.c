@@ -20,6 +20,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "config.h"
 
 #include "class.h"
+#include "interpreter.h"
 #include "jerror.h"
 #include "list.h"
 #include "loader.h"
@@ -29,15 +30,14 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "native_methods_service.h"
 #include "thread.h"
 #include "heap.h"
+#include "memman.h"
+#include "classtable.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-static bump_allocator_t s_permament_arena = {0}, s_temporary_arena = {0};
-static ClassTable_t s_class_table = {0};
-static struct list_head s_class_list = {0};
-static bool s_initialised = false; //Reinit protection (VM reset in firmwares)
+static bump_allocator_t *s_arena = NULL, *s_link_arena = NULL;
 
 //========================== PREEMTIVE SUPPORT 
 #ifdef TARGET_ESPIDF
@@ -68,104 +68,22 @@ static void class_exit_critical(){
 //=================================================
 
 void classes_init(){
-    INIT_LIST_HEAD(&s_class_list);
+    #ifdef TARGET_LINUX
+    pthread_mutexattr_t attr = {0};
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s_class_lock, &attr);
+    #else
+    s_class_lock = xSemaphoreCreateRecursiveMutex();
+    assert(s_class_lock);
+    #endif
 
-    if(!s_initialised){
-
-        #ifdef TARGET_LINUX
-        pthread_mutexattr_t attr = {0};
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(&s_class_lock, &attr);
-        #else
-        s_class_lock = xSemaphoreCreateRecursiveMutex();
-        assert(s_class_lock);
-        #endif
-
-        assert(bumper_create(&s_permament_arena, CLASS_PERMAMENT_ARENA) == 0);
-        assert(bumper_create(&s_temporary_arena, CLASS_TEMPOPARY_ARENA) == 0);
-        s_initialised = true;
-    } else {
-        memset(&s_class_table, 0, sizeof(s_class_table));
-        bumper_reset(&s_permament_arena);
-        bumper_reset(&s_temporary_arena);
-    }
-}
-
-static uint32_t hash(uint16_t name_id) {
-    uint32_t x = (uint32_t)name_id;
-    x = ((x >> 16) ^ x) * 0x45d9f3b;
-    x = ((x >> 16) ^ x) * 0x45d9f3b;
-    x = (x >> 16) ^ x;
-    return x;
-}
-
-typedef struct{
-    uint32_t index;
-    struct{
-        union{
-            uint8_t all;
-            struct{
-                unsigned is_error:1;
-                unsigned is_found:1;
-            };
-        };
-    }flags;
-}ClassTableCalculatedIndex_t;
-
-static ClassTableCalculatedIndex_t calculate_index(uint16_t name_id){
-    uint32_t start_pos = hash(name_id) % MAX_LOADED_CLASSES;
-    ClassTableCalculatedIndex_t retval = {0};
-
-    for(uint32_t i = 0; i < MAX_LOADED_CLASSES; i++){
-        uint32_t current_idx = (start_pos + i) % MAX_LOADED_CLASSES;
-        if(s_class_table.classes[current_idx] == NULL){
-            retval.index = current_idx;
-            retval.flags.is_found = 0;
-            retval.flags.is_error = 0;
-            goto exit;
-        } else if(s_class_table.classes[current_idx]->name_id == name_id){
-            retval.index = current_idx;
-            retval.flags.is_found = 1;
-            retval.flags.is_error = 0;
-            goto exit;
-        }
-    }
-
-    retval.flags.is_error = 1;
-exit:
-    return retval;
-}
-
-
-
-Class_t* class_find(uint16_t name_id){
-    ClassTableCalculatedIndex_t index = calculate_index(name_id);
-
-    return index.flags.is_found && !index.flags.is_error ? s_class_table.classes[index.index] : NULL;
-}
-
-Error_t class_insert(Class_t* class){
-    Error_t err = JERR_OK;
-    ClassTableCalculatedIndex_t index = calculate_index(class->name_id);
-
-    FAIL_SET_JUMP(!index.flags.is_error, err, JERR_OOM, exit);
-
-    INIT_LIST_HEAD(&class->list);
-    list_add(&class->list, &s_class_list);
-    
-    s_class_table.classes[index.index] = class;
-
-exit:
-    return err;
-}
-
-extern struct list_head* classes_get_all(){
-    return &s_class_list;
+    assert((s_arena = memman_get(VM_PERMA_ARENA_ID)));
+    assert((s_link_arena = memman_get(VM_LINKER_TMP_ARENA_ID)));
 }
 
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out);
-static Error_t class_link(Class_t* class);
+static Error_t class_link(Interpreter_t* ctx, Class_t* class);
 static JavaValueType_t array_class_type(char* name){
     if(strlen(name) > 1) return TYPE_REFERENCE;
     
@@ -179,12 +97,12 @@ static JavaValueType_t array_class_type(char* name){
     return TYPE_REFERENCE;
 }
 
-Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
-    Error_t err = JERR_OK;
+Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out){
     assert(out);
+    Error_t err = JERR_OK;
 
     class_enter_critical();
-    if((*out = class_find(name_id))) goto exit;
+    if((*out = classtable_get(name_id))) goto exit;
 
     char* string_name = stringpool_get(name_id);
     FAIL_SET_JUMP(string_name, err, JERR_BADPARAM, exit); //What the fuck did you just passed here?
@@ -193,9 +111,9 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         int jlname_id = stringpool_add("java/lang/Object");
         FAIL_SET_JUMP(jlname_id >= 0, err, JERR_OOM, exit);
 
-        FAIL_SET_JUMP((err = class_load_bynameid(jlname_id, &jlObject)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(ctx, jlname_id, &jlObject)) == JERR_OK, err, err, exit);
 
-        Class_t* array_class = bumper_calloc(&s_permament_arena, 1, sizeof(*array_class));
+        Class_t* array_class = bumper_calloc(s_arena, 1, sizeof(*array_class));
         FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
 
         INIT_LIST_HEAD(&array_class->hierarchy_list);
@@ -211,17 +129,17 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         array_class->object_size = jlObject->object_size;
 
         Class_t* jlClass = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &array_class->class_object)) == JERR_OK, err, err, exit);
 
         array_class->flags.is_linked = 1;
         array_class->flags.is_array = 1;
 
         *out = array_class;
-        FAIL_SET_JUMP((err = class_insert(array_class)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = classtable_put(array_class)) == JERR_OK, err, err, exit);
     } else {
         FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(string_name), out)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = class_link(*out)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_link(ctx, *out)) == JERR_OK, err, err, exit);
     }
 
 exit:
@@ -249,7 +167,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
            || constant->type == EJCT_METHODREF || constant->type == EJCT_INTERFACE_METHODREF
            || constant->type == EJCT_STRING){
 
-            ConstantPoolPatchSymbol_t* patch_sym = bumper_calloc(&s_temporary_arena, 1, sizeof(*patch_sym));
+            ConstantPoolPatchSymbol_t* patch_sym = bumper_calloc(s_link_arena, 1, sizeof(*patch_sym));
             if(!patch_sym) return 1;
 
             INIT_LIST_HEAD(&patch_sym->list);
@@ -263,7 +181,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
     }
 
     this_class->symtab.count = symtab_index;
-    this_class->symtab.symbols = bumper_calloc(&s_permament_arena, this_class->symtab.count, sizeof(*this_class->symtab.symbols));
+    this_class->symtab.symbols = bumper_calloc(s_arena, this_class->symtab.count, sizeof(*this_class->symtab.symbols));
     if(!this_class->symtab.symbols) return 1;
 
     ConstantPoolPatchSymbol_t* patch_sym = NULL;
@@ -273,7 +191,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
         
         switch(constant->type){
             case EJCT_CLASS:{
-                ClassProxySymbol_t* proxy_class = bumper_calloc(&s_permament_arena, 1, sizeof(*proxy_class));
+                ClassProxySymbol_t* proxy_class = bumper_calloc(s_arena, 1, sizeof(*proxy_class));
                 if(!proxy_class) return 1;
 
                 uint16_t name_index = *(uint16_t*)constant->value;
@@ -294,7 +212,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
             case EJCT_INTERFACE_METHODREF:
             case EJCT_METHODREF:
             case EJCT_FIELDREF:{
-                ClassProxySymbol_t* proxy_FMIM = bumper_calloc(&s_permament_arena, 1, sizeof(*proxy_FMIM));
+                ClassProxySymbol_t* proxy_FMIM = bumper_calloc(s_arena, 1, sizeof(*proxy_FMIM));
                 if(!proxy_FMIM) return 1;
 
                 JRaw_FMIM_ref_t* FMIM = constant->value;
@@ -338,7 +256,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
             break;
 
             case EJCT_STRING:{
-                ClassProxySymbol_t* proxy_string = bumper_calloc(&s_permament_arena, 1, sizeof(*proxy_string));
+                ClassProxySymbol_t* proxy_string = bumper_calloc(s_arena, 1, sizeof(*proxy_string));
                 if(!proxy_string) return 1;
 
                 int class_name_id = stringpool_add("java/lang/String");
@@ -377,7 +295,7 @@ static int patch_constantpool(Class_t* this_class, struct list_head* cp_convert_
                 }
 
                 unsigned sz = symbol->type == SYMBOL_LONG || symbol->type == SYMBOL_DOUBLE ? sizeof(uint64_t) : sizeof(uint32_t);
-                symbol->value = bumper_calloc(&s_permament_arena, 1, sz);
+                symbol->value = bumper_calloc(s_arena, 1, sz);
                 if(!symbol->value) return 1;
 
                 memcpy(symbol->value, constant->value, sz);
@@ -609,7 +527,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     FAIL_SET_JUMP((this_name_id >= 0 && (super_name_id >= 0 || super_name_string == NULL)), err, JERR_OOM, exit);
 
-    Class_t* this_class = bumper_calloc(&s_permament_arena, 1, sizeof(*this_class));
+    Class_t* this_class = bumper_calloc(s_arena, 1, sizeof(*this_class));
     FAIL_SET_JUMP(this_class, err, JERR_OOM, exit);
 
     this_class->array_type = TYPE_VOID;
@@ -617,13 +535,13 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->flags.is_final = (parsed_class->flags & ACC_FINAL) == ACC_FINAL;
     this_class->flags.is_abstract = (parsed_class->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
 
-    ClassLinkTimeMetadata_t* metadata = bumper_calloc(&s_temporary_arena, 1, sizeof(*metadata));
+    ClassLinkTimeMetadata_t* metadata = bumper_calloc(s_link_arena, 1, sizeof(*metadata));
     FAIL_SET_JUMP(metadata, err, JERR_OOM, exit);
 
     metadata->is_root = !super_name_string;
     metadata->parent_name_id = super_name_id;
     metadata->implements_count = parsed_class->interfaces_count;
-    metadata->implements = bumper_calloc(&s_temporary_arena, metadata->implements_count,sizeof(*metadata->implements));
+    metadata->implements = bumper_calloc(s_link_arena, metadata->implements_count,sizeof(*metadata->implements));
     FAIL_SET_JUMP(metadata->implements, err, JERR_OOM, exit);
 
     for(unsigned i = 0; i < metadata->implements_count; i++){
@@ -641,7 +559,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
     this_class->implements.count = metadata->implements_count;
-    this_class->implements.implementations = bumper_calloc(&s_permament_arena, this_class->implements.count, sizeof(*this_class->implements.implementations));
+    this_class->implements.implementations = bumper_calloc(s_arena, this_class->implements.count, sizeof(*this_class->implements.implementations));
     FAIL_SET_JUMP(this_class->implements.implementations, err, JERR_OOM, exit);
 
     //Constantpool / symtab init
@@ -656,8 +574,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     this_class->static_fields.count = fields_count[1];
     this_class->instance_fields.count = fields_count[0];
-    this_class->instance_fields.fields = bumper_calloc(&s_permament_arena, this_class->instance_fields.count, sizeof(*this_class->instance_fields.fields));
-    this_class->static_fields.fields = bumper_calloc(&s_permament_arena, this_class->static_fields.count, sizeof(*this_class->static_fields.fields));
+    this_class->instance_fields.fields = bumper_calloc(s_arena, this_class->instance_fields.count, sizeof(*this_class->instance_fields.fields));
+    this_class->static_fields.fields = bumper_calloc(s_arena, this_class->static_fields.count, sizeof(*this_class->static_fields.fields));
 
     FAIL_SET_JUMP(this_class->instance_fields.fields && this_class->static_fields.fields, err, JERR_OOM, exit); 
 
@@ -680,7 +598,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         char* raw_field_name_cstr = (char*)raw_field_name_utf8->string;
 
         size_t mangled_len = strlen(raw_field_descriptor_cstr) + strlen(raw_field_name_cstr) + 2;
-        char* mangled_name = bumper_calloc(&s_temporary_arena, 1, mangled_len);
+        char* mangled_name = bumper_calloc(s_link_arena, 1, mangled_len);
         FAIL_SET_JUMP(mangled_name, err, JERR_OOM, exit);
         snprintf(mangled_name, mangled_len, "%s@%s", raw_field_name_cstr, raw_field_descriptor_cstr);
 
@@ -712,13 +630,13 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
             }
         }
     }
-    this_class->storage = bumper_calloc(&s_permament_arena, offsets[1], sizeof(int32_t));
+    this_class->storage = bumper_calloc(s_arena, offsets[1], sizeof(int32_t));
     FAIL_SET_JUMP(this_class->storage, err, JERR_OOM, exit);
 
     this_class->object_size = offsets[0] * sizeof(int32_t); //Will will use this also on linker stage to calculate proper offsets
 
     this_class->methods.count = parsed_class->methods_count;
-    this_class->methods.methods = bumper_calloc(&s_permament_arena, this_class->methods.count, sizeof(*this_class->methods.methods));
+    this_class->methods.methods = bumper_calloc(s_arena, this_class->methods.count, sizeof(*this_class->methods.methods));
     FAIL_SET_JUMP(this_class->methods.methods, err, JERR_OOM, exit);
 
     for(unsigned i = 0; i < parsed_class->methods_count; i++){
@@ -753,7 +671,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         char* raw_method_name_cstr = (char*)raw_method_name_utf8->string;
 
         size_t mangled_len = strlen(raw_method_descriptor_cstr) + strlen(raw_method_name_cstr) + 2;
-        char* mangled_name = bumper_calloc(&s_temporary_arena, 1, mangled_len);
+        char* mangled_name = bumper_calloc(s_link_arena, 1, mangled_len);
         FAIL_SET_JUMP(mangled_name, err, JERR_OOM, exit);
 
         snprintf(mangled_name, mangled_len, "%s@%s", raw_method_name_cstr, raw_method_descriptor_cstr);
@@ -766,7 +684,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type)) == JERR_OK, err, err, exit);
         method->args_slots += !method->flags.is_static;
         method->args_bitmap_size = (method->args_slots + 31) / 32; //32 bits in uint32_t.......
-        FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(&s_permament_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
+        FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(s_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
        
         FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, !method->flags.is_static, method->args_bitmap)) == JERR_OK, err, err, exit); 
 
@@ -777,9 +695,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
             list_for_each_entry(attribute, &raw_method->attributes, list){
                 if(attribute->type == EJAT_CODE){
                     JCodeAttribute_t* code = attribute->info;
-                    MethodBytecode_t* bytecode = bumper_calloc(&s_permament_arena, 1, sizeof(*bytecode));
+                    MethodBytecode_t* bytecode = bumper_calloc(s_arena, 1, sizeof(*bytecode));
                     FAIL_SET_JUMP(bytecode, err, JERR_OOM, exit);
-                    FAIL_SET_JUMP((bytecode->verifier_info = bumper_calloc(&s_permament_arena, 1, sizeof(*bytecode->verifier_info))), err, JERR_OOM, exit);
+                    FAIL_SET_JUMP((bytecode->verifier_info = bumper_calloc(s_arena, 1, sizeof(*bytecode->verifier_info))), err, JERR_OOM, exit);
 
                     JRawAttribute_t* inside_attribute = NULL;
                     list_for_each_entry(inside_attribute, &code->attributes, list){
@@ -787,7 +705,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
                             JStackMap_t* stackmap = inside_attribute->info;
 
                             bytecode->verifier_info->frame_count = stackmap->entries_count;
-                            FAIL_SET_JUMP((bytecode->verifier_info->frames = bumper_calloc(&s_permament_arena, bytecode->verifier_info->frame_count, sizeof(*bytecode->verifier_info->frames))), err, JERR_OOM, exit);
+                            FAIL_SET_JUMP((bytecode->verifier_info->frames = bumper_calloc(s_arena, bytecode->verifier_info->frame_count, sizeof(*bytecode->verifier_info->frames))), err, JERR_OOM, exit);
 
                             for(unsigned i = 0; i < bytecode->verifier_info->frame_count; i++){
                                 JStackMapFrame_t* frame_original = &stackmap->entries[i];
@@ -796,8 +714,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
                                 frame->locals_count = frame_original->locals_count;
                                 frame->stack_size = frame->stack_size;
                                 
-                                FAIL_SET_JUMP((frame->locals = bumper_calloc(&s_permament_arena, frame->locals_count, sizeof(*frame->locals))), err, JERR_OOM, exit);
-                                FAIL_SET_JUMP((frame->stack = bumper_calloc(&s_permament_arena, frame->stack_size, sizeof(*frame->stack))), err, JERR_OOM, exit);
+                                FAIL_SET_JUMP((frame->locals = bumper_calloc(s_arena, frame->locals_count, sizeof(*frame->locals))), err, JERR_OOM, exit);
+                                FAIL_SET_JUMP((frame->stack = bumper_calloc(s_arena, frame->stack_size, sizeof(*frame->stack))), err, JERR_OOM, exit);
 
                                 for(unsigned j = 0; j < frame->locals_count; j++){
                                     frame->locals[j].ctx = frame_original->locals[j].ctx;
@@ -817,13 +735,13 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
                     bytecode->max_locals = code->max_locals;
                     bytecode->max_stack = code->max_stack;
                     bytecode->code_length = code->code_length;
-                    bytecode->code = bumper_alloc(&s_permament_arena, bytecode->code_length);
+                    bytecode->code = bumper_alloc(s_arena, bytecode->code_length);
                     FAIL_SET_JUMP(bytecode->code, err, JERR_OOM, exit);
 
                     memcpy(bytecode->code, code->code, bytecode->code_length);
 
                     bytecode->exception_count = code->exception_table_length;
-                    bytecode->exceptions = bumper_calloc(&s_permament_arena, bytecode->exception_count, sizeof(*bytecode->exceptions));
+                    bytecode->exceptions = bumper_calloc(s_arena, bytecode->exception_count, sizeof(*bytecode->exceptions));
                     FAIL_SET_JUMP(bytecode->exceptions, err, JERR_OOM, exit);
 
                     for(unsigned i = 0; i < bytecode->exception_count; i++){
@@ -844,7 +762,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         }
     }
 
-    FAIL_SET_JUMP(class_insert(this_class) == 0, err, JERR_OOM, exit);
+    FAIL_SET_JUMP(classtable_put(this_class) == 0, err, JERR_OOM, exit);
     *out = this_class;
 
 exit:
@@ -862,53 +780,41 @@ static Method_t* class_find_vtable_method(Class_t* class, uint16_t name_id){
 }
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id){
-    for(unsigned i = 0; i < class->methods.count; i++){
-        Method_t* method = &class->methods.methods[i];
-        if(method->name_id == name_id)
-            return method;
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        for(unsigned i = 0; i < cur->methods.count; i++){
+            Method_t* method = &cur->methods.methods[i];
+            if(method->name_id == name_id)
+                return method;
+        }
     }
 
     return NULL;
 }
 
-
-//Hack but should work well with class_fix_hierarchy interface resolution logic
-static Error_t class_find_imethod(Class_t* class, uint16_t name_id, uint16_t* index_out){
-    unsigned vindex = 0;
-    for(unsigned i = 0; i < class->methods.count; i++){
-        Method_t* method = &class->methods.methods[i];
-        if(method->flags.is_virtual){
-            vindex++;
-            if(method->name_id == name_id){
-                *index_out = vindex;
-                return JERR_OK;
-            }
-        }
-    }
-
-    return JERR_NOTFOUND;
-}
-
 Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
-    for(unsigned i = 0; i < class->static_fields.count; i++){
-        Field_t* field = &class->static_fields.fields[i];
-        if(field->name_id == name_id)
-            return field;
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        for(unsigned i = 0; i < cur->static_fields.count; i++){
+            Field_t* field = &cur->static_fields.fields[i];
+            if(field->name_id == name_id)
+                return field;
+        }
     }
     return NULL;
 }
 
 Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
-    for(unsigned i = 0; i < class->instance_fields.count; i++){
-        Field_t* field = &class->instance_fields.fields[i];
-        if(field->name_id == name_id)
-            return field;
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        for(unsigned i = 0; i < cur->instance_fields.count; i++){
+            Field_t* field = &cur->instance_fields.fields[i];
+            if(field->name_id == name_id)
+                return field;
+        }
     }
     return NULL;
 }
 
 Error_t jstringpool_get(uint16_t name_id, Object_t** output);
-Error_t class_resolv_symbol(ClassSymbol_t* symbol){
+Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
     Error_t err = JERR_OK;
 
     class_enter_critical();
@@ -917,7 +823,7 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
     ClassProxySymbol_t* proxy_symbol = symbol->value;
     
     Class_t* origin = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(proxy_symbol->origin_name_id, &origin)) == JERR_OK,err,err,exit);
+    FAIL_SET_JUMP((err = class_load_bynameid(ctx, proxy_symbol->origin_name_id, &origin)) == JERR_OK,err,err,exit);
 
     switch(symbol->type){
         case PROXY_SYMBOL_CLASS:{
@@ -933,11 +839,11 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
             FAIL_SET_JUMP(symbol->value, err, JERR_NOSUCHFIELD, exit);
 
             Field_t* field = symbol->value;
-            if(!field->flags.is_public){
+            if(!field->flags.is_public && thread_self_get()){
                 if(field->flags.is_protected){
-                    FAIL_SET_JUMP(class_is_subclass(thread_self_get()->interpreter.frame->method->class, field->class), err, JERR_ILLEGALACCESS, exit);
+                    FAIL_SET_JUMP(class_is_subclass(ctx->frame->method->class, field->class), err, JERR_ILLEGALACCESS, exit);
                 } else if(field->flags.is_private){
-                    FAIL_SET_JUMP(thread_self_get()->interpreter.frame->method->class == field->class, err, JERR_ILLEGALACCESS, exit);
+                    FAIL_SET_JUMP(ctx->frame->method->class == field->class, err, JERR_ILLEGALACCESS, exit);
                 }
             }
         }
@@ -948,18 +854,18 @@ Error_t class_resolv_symbol(ClassSymbol_t* symbol){
             FAIL_SET_JUMP((symbol->value = class_find_method(origin, proxy_symbol->self_name_id)), err, JERR_NOSUCHMETHOD, exit);
 
             Method_t* method = symbol->value;
-            if(!method->flags.is_public){
+            if(!method->flags.is_public && thread_self_get()){
                 if(method->flags.is_protected){
-                    FAIL_SET_JUMP(class_is_subclass(thread_self_get()->interpreter.frame->method->class, method->class), err, JERR_ILLEGALACCESS, exit);
+                    FAIL_SET_JUMP(class_is_subclass(ctx->frame->method->class, method->class), err, JERR_ILLEGALACCESS, exit);
                 } else if(method->flags.is_private){
-                    FAIL_SET_JUMP(thread_self_get()->interpreter.frame->method->class == method->class, err, JERR_ILLEGALACCESS, exit);
+                    FAIL_SET_JUMP(ctx->frame->method->class == method->class, err, JERR_ILLEGALACCESS, exit);
                 }
             }
         }
         break;
 
         case PROXY_SYMBOL_STRING:{
-            FAIL_SET_JUMP((err = jstringpool_get(proxy_symbol->self_name_id, (Object_t**)&symbol->value)) == JERR_OK, err, err, exit);
+            assert((symbol->value = stringpool_get_java(ctx, proxy_symbol->self_name_id)));
             symbol->type = SYMBOL_STRING;
         }
         break;
@@ -980,7 +886,7 @@ static unsigned count_instance_methods(Class_t* class){
     return count;
 }
 
-static Error_t class_fix_hierarchy(Class_t* this_class){
+static Error_t class_fix_hierarchy(Interpreter_t* ctx, Class_t* this_class){
     Error_t err = JERR_OK;
 
     Class_t* parent = this_class->parent;
@@ -1005,7 +911,7 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
             }
         }
 
-        this_class->vtable = bumper_calloc(&s_permament_arena, this_class->vtable_size, sizeof(*this_class->vtable));
+        this_class->vtable = bumper_calloc(s_arena, this_class->vtable_size, sizeof(*this_class->vtable));
         FAIL_SET_JUMP(this_class->vtable, err, JERR_OOM, exit);
 
         unsigned vtable_index = parent ? parent->vtable_size : 0;
@@ -1029,13 +935,13 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
     //Finally fix interfaces
     for(unsigned i = 0; i < this_class->implements.count; i++){
         Implementation_t* implementation = &this_class->implements.implementations[i];
-        FAIL_SET_JUMP((err = class_load_bynameid(metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(ctx, metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
         Class_t* interface = implementation->interface;
 
         FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
 
         implementation->methods_count = count_instance_methods(interface);
-        FAIL_SET_JUMP((implementation->methods = bumper_calloc(&s_permament_arena, implementation->methods_count, sizeof(*implementation->methods))), err, JERR_OOM, exit);
+        FAIL_SET_JUMP((implementation->methods = bumper_calloc(s_arena, implementation->methods_count, sizeof(*implementation->methods))), err, JERR_OOM, exit);
 
         unsigned iindex = 0;
         for(unsigned j = 0; j < interface->methods.count; j++){
@@ -1048,12 +954,16 @@ static Error_t class_fix_hierarchy(Class_t* this_class){
         }
     }
 
+
+    Thread_t* thread = thread_self_get();
+    ctx = thread ? &thread->interpreter : ctx; //Decide should we use global fallback interpreter or thread's one (so it can catch init exception in theory)
+
     Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
-    FAIL_SET_JUMP(!clinit || (err = interpreter_method_invoke(clinit, NULL, NULL)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP(!clinit || (err = interpreter_method_invoke(ctx, clinit, NULL, NULL)) == JERR_OK, err, err, exit);
 
     Field_t* nativeClassPointer_field = NULL;
     Class_t* jlClass = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
@@ -1067,7 +977,7 @@ exit:
     return err;
 }
 
-static Error_t class_link(Class_t* class){
+static Error_t class_link(Interpreter_t* ctx, Class_t* class){
     static unsigned deepness = 0;
     Error_t err = JERR_OK;
     LIST_HEAD(hierarchy_list);
@@ -1081,7 +991,7 @@ static Error_t class_link(Class_t* class){
         if(cur_class->flags.is_linked) break;
 
         ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
-        if(!metadata->is_root && !(cur_class->parent = class_find(metadata->parent_name_id))){
+        if(!metadata->is_root && !(cur_class->parent = classtable_get(metadata->parent_name_id))){
             //Using raw API to make it work properly
             FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(metadata->parent_name_id)), &cur_class->parent)) == JERR_OK, err, err, exit);
             cur_class = cur_class->parent;
@@ -1091,12 +1001,12 @@ static Error_t class_link(Class_t* class){
     Class_t* linking_class = NULL;
     list_for_each_entry(linking_class, &hierarchy_list, hierarchy_list){
         if(!linking_class->flags.is_linked)
-            FAIL_SET_JUMP((err = class_fix_hierarchy(linking_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = class_fix_hierarchy(ctx, linking_class)) == JERR_OK, err, err, exit);
     }
 
 exit:
     if(--deepness == 0)
-        bumper_reset(&s_temporary_arena);
+        bumper_reset(s_link_arena);
     return err;
 }
 

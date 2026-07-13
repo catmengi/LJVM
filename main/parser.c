@@ -25,20 +25,17 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include "jerror.h"
 #include "stream.h"
+#include "memman.h"
 
 #include <assert.h>
 #include <string.h>
 
 #define JMAGIC 0xCAFEBABE
 
-static bump_allocator_t s_parser_arena = {0}; 
-static bool s_initalised = false;
+static bump_allocator_t* s_arena = NULL; 
 
 void parser_init(){
-    if(!s_initalised){
-        assert(bumper_create(&s_parser_arena, PARSER_ARENA) == 0);
-        s_initalised = true;
-    } else bumper_reset(&s_parser_arena);
+    assert((s_arena = memman_get(VM_PARSER_ARENA_ID)));
 }
 
 static Error_t init_constantpool(JConstantPool_t* constantpool, unsigned size, bump_allocator_t* allocate_from){
@@ -61,12 +58,12 @@ typedef void* (*ConstantParser_t)(ClassStream_t* stream);
 static void* Cparse_utf8(ClassStream_t* stream){
     void* ret = NULL;
 
-    JRawUTF8_t* utf8_constant = bumper_alloc(&s_parser_arena,sizeof(*utf8_constant));
+    JRawUTF8_t* utf8_constant = bumper_alloc(s_arena,sizeof(*utf8_constant));
     FAIL_SET_JUMP(utf8_constant,ret,NULL,exit);
 
     FAIL_SET_JUMP(classstream_readU16(stream,&utf8_constant->length) == 0,ret,NULL,exit);
 
-    utf8_constant->string = bumper_alloc(&s_parser_arena,utf8_constant->length + 1);
+    utf8_constant->string = bumper_alloc(s_arena,utf8_constant->length + 1);
     FAIL_SET_JUMP(utf8_constant->string,ret,NULL,exit);
 
     FAIL_SET_JUMP(classstream_readBUF(stream,utf8_constant->string,utf8_constant->length) == 0,ret,NULL,exit);
@@ -83,7 +80,7 @@ static void* Cparse_class(ClassStream_t* stream){
     uint16_t name_index = 0;
     FAIL_SET_JUMP(classstream_readU16(stream,&name_index) == 0,ret,NULL,exit);
 
-    uint16_t* constant_info = bumper_alloc(&s_parser_arena,sizeof(name_index));
+    uint16_t* constant_info = bumper_alloc(s_arena,sizeof(name_index));
     FAIL_SET_JUMP(constant_info,ret,NULL,exit);
 
     *constant_info = name_index;
@@ -98,7 +95,7 @@ static void* Cparse_string(ClassStream_t* stream){
     uint16_t index = 0;
     FAIL_SET_JUMP(classstream_readU16(stream,&index) == 0,ret,NULL,exit);
 
-    uint16_t* string_index = bumper_alloc(&s_parser_arena,sizeof(index));
+    uint16_t* string_index = bumper_alloc(s_arena,sizeof(index));
     FAIL_SET_JUMP(string_index,ret,NULL,exit);
 
     *string_index = index;
@@ -110,7 +107,7 @@ exit:
 static void* Cparse_u32(ClassStream_t* stream){
     void* ret = NULL;
 
-    uint32_t* u32 = bumper_alloc(&s_parser_arena,sizeof(*u32));
+    uint32_t* u32 = bumper_alloc(s_arena,sizeof(*u32));
     FAIL_SET_JUMP(u32,ret,NULL,exit);
 
     FAIL_SET_JUMP(classstream_readU32(stream,u32) == 0,ret,NULL,exit);
@@ -122,7 +119,7 @@ exit:
 static void* Cparse_u64(ClassStream_t* stream){
     void* ret = NULL;
 
-    uint64_t* u64 = bumper_alloc(&s_parser_arena,sizeof(*u64));
+    uint64_t* u64 = bumper_alloc(s_arena,sizeof(*u64));
     FAIL_SET_JUMP(u64,ret,NULL,exit);
 
     FAIL_SET_JUMP(classstream_readU64(stream,u64) == 0,ret,NULL,exit);
@@ -134,7 +131,7 @@ exit:
 static void* Cparse_fmim(ClassStream_t* stream){
     void* ret = NULL;
 
-    JRaw_FMIM_ref_t* fmim_ref = bumper_alloc(&s_parser_arena,sizeof(*fmim_ref));
+    JRaw_FMIM_ref_t* fmim_ref = bumper_alloc(s_arena,sizeof(*fmim_ref));
     FAIL_SET_JUMP(fmim_ref,ret,NULL,exit);
 
     FAIL_SET_JUMP(classstream_readU16(stream,&fmim_ref->class_index) == 0,ret,NULL,exit);
@@ -148,7 +145,7 @@ exit:
 static void* Cparse_nameandtype(ClassStream_t* stream){
     void* ret = NULL;
 
-    JRawNameAndType_t* nameandtype = bumper_alloc(&s_parser_arena,sizeof(*nameandtype));
+    JRawNameAndType_t* nameandtype = bumper_alloc(s_arena,sizeof(*nameandtype));
     FAIL_SET_JUMP(nameandtype, ret, NULL, exit);
 
     FAIL_SET_JUMP(classstream_readU16(stream,&nameandtype->name_index) == 0,ret,NULL,exit);
@@ -183,20 +180,20 @@ typedef struct{
 static Error_t parse_attributes(struct list_head* output_list,JRawClass_t* current_class, ClassStream_t* stream);
 
 static void* code_parse(JRawClass_t* current_class, ClassStream_t* stream){
-    JCodeAttribute_t* code = bumper_calloc(&s_parser_arena,1,sizeof(*code));
+    JCodeAttribute_t* code = bumper_calloc(s_arena,1,sizeof(*code));
     if(!code) return NULL;
 
     if(classstream_readU16(stream,&code->max_stack) != 0) return NULL;
     if(classstream_readU16(stream,&code->max_locals) != 0) return NULL;
     if(classstream_readU32(stream,&code->code_length) != 0) return NULL;
 
-    code->code = bumper_alloc(&s_parser_arena,code->code_length);
+    code->code = bumper_alloc(s_arena,code->code_length);
     if(!code->code) return NULL;
 
     if(classstream_readBUF(stream, code->code, code->code_length) != 0) return NULL;
     if(classstream_readU16(stream,&code->exception_table_length) != 0) return NULL;
 
-    code->exception_table = bumper_calloc(&s_parser_arena,code->exception_table_length,sizeof(*code->exception_table));
+    code->exception_table = bumper_calloc(s_arena,code->exception_table_length,sizeof(*code->exception_table));
     if(!code->exception_table) return NULL;
 
     for(unsigned i = 0; i < code->exception_table_length; i++){
@@ -219,7 +216,7 @@ static void* code_parse(JRawClass_t* current_class, ClassStream_t* stream){
 }
 
 static void* constantvalue_parse(JRawClass_t* current_class, ClassStream_t* stream){
-    uint16_t* constant_index = bumper_alloc(&s_parser_arena,sizeof(*constant_index));
+    uint16_t* constant_index = bumper_alloc(s_arena,sizeof(*constant_index));
     if(!constant_index) return NULL;
     if(classstream_readU16(stream, constant_index) != 0) return NULL;
 
@@ -240,13 +237,13 @@ static int stackmapframe_parse(JStackMapFrame_t* frame, ClassStream_t* stream){
     if(classstream_readU16(stream, &frame->pc_pos) != 0) return 1;
 
     if(classstream_readU16(stream, &frame->locals_count) != 0) return 1;
-    if(!(frame->locals = bumper_calloc(&s_parser_arena, frame->locals_count, sizeof(*frame->locals)))) return 1;
+    if(!(frame->locals = bumper_calloc(s_arena, frame->locals_count, sizeof(*frame->locals)))) return 1;
     for(unsigned i = 0; i < frame->locals_count; i++){
         if(stackmapframeverifierinfo_parse(&frame->locals[i], stream)) return 1;
     }
 
     if(classstream_readU16(stream, &frame->stack_size) != 0) return 1;
-    if(!(frame->stack = bumper_calloc(&s_parser_arena, frame->stack_size, sizeof(*frame->stack)))) return 1;
+    if(!(frame->stack = bumper_calloc(s_arena, frame->stack_size, sizeof(*frame->stack)))) return 1;
     for(unsigned i = 0; i < frame->stack_size; i++){
         if(stackmapframeverifierinfo_parse(&frame->stack[i], stream)) return 1;
     }
@@ -255,11 +252,11 @@ static int stackmapframe_parse(JStackMapFrame_t* frame, ClassStream_t* stream){
 }
 
 static void* stackmap_parse(JRawClass_t* class, ClassStream_t* stream){
-    JStackMap_t* stackmap = bumper_calloc(&s_parser_arena, 1, sizeof(*stackmap));
+    JStackMap_t* stackmap = bumper_calloc(s_arena, 1, sizeof(*stackmap));
     if(!stackmap) return NULL;
 
     if(classstream_readU16(stream, &stackmap->entries_count) != 0) return NULL;
-    if(!(stackmap->entries = bumper_calloc(&s_parser_arena, stackmap->entries_count, sizeof(*stackmap->entries)))) return NULL;
+    if(!(stackmap->entries = bumper_calloc(s_arena, stackmap->entries_count, sizeof(*stackmap->entries)))) return NULL;
 
     for(unsigned i = 0; i < stackmap->entries_count; i++){
         if(stackmapframe_parse(&stackmap->entries[i], stream) != 0) return NULL;
@@ -296,7 +293,7 @@ static Error_t parse_attributes(struct list_head* output_list,JRawClass_t* curre
     }
 
     if(attribute_parser){
-        JRawAttribute_t* new_attribute = bumper_calloc(&s_parser_arena,1,sizeof(*new_attribute));
+        JRawAttribute_t* new_attribute = bumper_calloc(s_arena,1,sizeof(*new_attribute));
         FAIL_SET_JUMP(new_attribute,err,JERR_OOM,exit);
 
         INIT_LIST_HEAD(&new_attribute->list);
@@ -316,7 +313,7 @@ exit:
 
 
 JRawClass_t* parser_parse_class(ClassStream_t* stream){
-    bumper_reset(&s_parser_arena);
+    bumper_reset(s_arena);
     JRawClass_t* ret = NULL;
 
     FAIL_SET_JUMP(stream, ret, NULL, exit);
@@ -325,14 +322,14 @@ JRawClass_t* parser_parse_class(ClassStream_t* stream){
     FAIL_SET_JUMP(classstream_readU32(stream,&magic) == 0,ret, NULL,exit);
     FAIL_SET_JUMP(magic == JMAGIC, ret, NULL,exit);
 
-    JRawClass_t* new_class = bumper_calloc(&s_parser_arena,1,sizeof(*new_class));
+    JRawClass_t* new_class = bumper_calloc(s_arena,1,sizeof(*new_class));
 
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->version.minor) == 0,ret, NULL,exit);
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->version.major) == 0,ret, NULL,exit);
 
     uint16_t constantpool_size = 0;
     FAIL_SET_JUMP(classstream_readU16(stream,&constantpool_size) == 0,ret, NULL,exit);
-    FAIL_SET_JUMP(init_constantpool(&new_class->constantpool, constantpool_size, &s_parser_arena) == JERR_OK,ret, NULL,exit);
+    FAIL_SET_JUMP(init_constantpool(&new_class->constantpool, constantpool_size, s_arena) == JERR_OK,ret, NULL,exit);
 
     JConstantPool_t* constant_pool = &new_class->constantpool;
     for(unsigned i = 1; i < constantpool_size; i++){
@@ -358,7 +355,7 @@ JRawClass_t* parser_parse_class(ClassStream_t* stream){
 
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->interfaces_count) == 0,ret, NULL,exit);
 
-    new_class->interfaces = bumper_calloc(&s_parser_arena,new_class->interfaces_count,sizeof(*new_class->interfaces));
+    new_class->interfaces = bumper_calloc(s_arena,new_class->interfaces_count,sizeof(*new_class->interfaces));
     FAIL_SET_JUMP(new_class->interfaces,ret, NULL,exit);
 
     for(unsigned i = 0; i < new_class->interfaces_count; i++){
@@ -367,7 +364,7 @@ JRawClass_t* parser_parse_class(ClassStream_t* stream){
 
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->fields_count) == 0,ret, NULL,exit);
 
-    new_class->fields = bumper_calloc(&s_parser_arena,new_class->fields_count,sizeof(*new_class->fields));
+    new_class->fields = bumper_calloc(s_arena,new_class->fields_count,sizeof(*new_class->fields));
     FAIL_SET_JUMP(new_class->fields,ret, NULL,exit);    
 
     for(unsigned i = 0; i < new_class->fields_count; i++){
@@ -387,7 +384,7 @@ JRawClass_t* parser_parse_class(ClassStream_t* stream){
 
     FAIL_SET_JUMP(classstream_readU16(stream,&new_class->methods_count) == 0,ret, NULL,exit);
 
-    new_class->methods = bumper_calloc(&s_parser_arena,new_class->methods_count,sizeof(*new_class->methods));
+    new_class->methods = bumper_calloc(s_arena,new_class->methods_count,sizeof(*new_class->methods));
     FAIL_SET_JUMP(new_class->methods,ret, NULL,exit);    
 
     for(unsigned i = 0; i < new_class->methods_count; i++){

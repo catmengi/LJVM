@@ -20,9 +20,23 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #pragma once
 
 #include <stdint.h>
+#include "list.h"
 #include "config.h"
+#include "interpreter.h"
 
+typedef struct Object_t Object_t;
+typedef struct{
+    char* cstr;
+    _Atomic(Object_t*) jstr;
+}StringpoolItem_t;
+
+typedef struct{
+    struct list_head list;
+    //atomic_flag spinlock;
+    StringpoolItem_t items[STRINGPOOL_ENTRY_ITEMS_COUNT];
+}StringpoolEntry_t;
 
 void stringpool_init();
-int stringpool_add(char* string);
-char* stringpool_get(int index);
+int32_t stringpool_add(char* string);
+char* stringpool_get(int32_t index);
+Object_t* stringpool_get_java(Interpreter_t* ctx, int32_t name_id);

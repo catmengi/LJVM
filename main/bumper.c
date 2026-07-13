@@ -19,13 +19,18 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include "bumper.h"
 
+#include <stdatomic.h>
 #include <sys/types.h>
 #include <string.h>
+
+#define BUMPER_CRTIICAL_ENTER(arena) ({while(atomic_flag_test_and_set(&(arena)->spinlock)){}})
+#define BUMPER_CRITICAL_EXIT(arena) atomic_flag_clear(&(arena)->spinlock)
 
 int bumper_create(bump_allocator_t* arena, size_t size){
     void* arena_memory = SYS_ALLOC(size);
     if(arena_memory == NULL) return 1;
 
+    arena->spinlock = (atomic_flag)ATOMIC_FLAG_INIT;
     arena->last_end = arena->memory = arena_memory;
     arena->size = size;
     memset(arena->memory, 0, arena->size);
@@ -34,6 +39,7 @@ int bumper_create(bump_allocator_t* arena, size_t size){
 }
 
 int bumper_create_from(bump_allocator_t* arena, void* arena_memory, size_t size){
+    arena->spinlock = (atomic_flag)ATOMIC_FLAG_INIT;
     arena->last_end = arena->memory = arena_memory;
     arena->size = size;
 
@@ -45,24 +51,36 @@ void bumper_destroy(bump_allocator_t* arena){
 }
 
 void bumper_reset(bump_allocator_t* arena){
+    BUMPER_CRTIICAL_ENTER(arena);
     arena->last_end = arena->memory;
+    BUMPER_CRITICAL_EXIT(arena);
 }
 
 void* bumper_alloc(bump_allocator_t* arena, size_t size){
-    if((ssize_t)(arena->size - (arena->last_end - arena->memory)) < size)
+    BUMPER_CRTIICAL_ENTER(arena);
+
+    if((ssize_t)(arena->size - (arena->last_end - arena->memory)) < size){
+        BUMPER_CRITICAL_EXIT(arena);
         return NULL;
+    }
 
     void* new_memory = arena->last_end;
     arena->last_end += size;
 
+    BUMPER_CRITICAL_EXIT(arena);
     return new_memory;
 }
 
 void bumper_unwind(bump_allocator_t* arena, size_t size){
-    if((arena->last_end - arena->memory) < size)
-        return;
+    BUMPER_CRTIICAL_ENTER(arena);
 
+    if((arena->last_end - arena->memory) < size){
+        BUMPER_CRITICAL_EXIT(arena);
+        return;
+    }
     arena->last_end -= size;
+
+    BUMPER_CRITICAL_EXIT(arena);
 }
 
 size_t bumper_size(bump_allocator_t* arena){
@@ -70,11 +88,19 @@ size_t bumper_size(bump_allocator_t* arena){
 }
 
 size_t bumper_used(bump_allocator_t* arena){
-    return arena->last_end - arena->memory;
+    BUMPER_CRTIICAL_ENTER(arena);
+    size_t size = arena->last_end - arena->memory;
+    BUMPER_CRITICAL_EXIT(arena);
+
+    return size;
 }
 
 void* bumper_arena_end(bump_allocator_t* arena){
-    return arena->memory + arena->size;
+    BUMPER_CRTIICAL_ENTER(arena);
+    void* end = arena->memory + arena->size;
+    BUMPER_CRITICAL_EXIT(arena);
+
+    return end;
 }
 
 void* bumper_arena_start(bump_allocator_t* arena){

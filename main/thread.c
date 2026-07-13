@@ -24,15 +24,15 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "interpreter.h"
 #include "list.h"
 #include "monitor.h"
+#include "stringpool.h"
 
 #include <assert.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdatomic.h>
 #include <time.h>
-
-static bool is_initialised = false;
 
 static __thread Thread_t* s_current_thread = NULL;
 
@@ -49,7 +49,10 @@ void threads_init(){
 }
 
 
-inline Thread_t* thread_self_get(){return s_current_thread;}
+inline Thread_t* thread_self_get(){
+    return s_current_thread;
+}
+
 void thread_notify_wait(){
     atomic_fetch_sub(&s_active_threads, 1);
     //atomic_fetch_add_explicit(&s_parked_threads, 1, memory_order_seq_cst);
@@ -96,11 +99,15 @@ void thread_notify_send(Thread_t* thread){
 
 void thread_safepoint_request(){
     //atomic_fetch_sub(&s_active_threads, 1);
+request:
     if(!atomic_exchange(&s_safepoint_requested, true)){
         while(atomic_load(&s_active_threads) != 1){
             usleep(1000); //Should be enough
         }
-    } else thread_safepoint_check();
+    } else{
+        thread_safepoint_check();
+        goto request; //reenter
+    }
     //atomic_fetch_add(&s_active_threads, 1);
 }
 
@@ -125,13 +132,15 @@ inline void thread_safepoint_release(){
 }
 
 
-Thread_t* thread_alloc(){
+Thread_t* thread_alloc(Object_t* jlThread){
     Thread_t* new_thread = calloc(1, sizeof(*new_thread));
 
     if(new_thread){
         INIT_LIST_HEAD(&new_thread->joiners);
         INIT_LIST_HEAD(&new_thread->list);
         INIT_LIST_HEAD(&new_thread->gc_list);
+
+        new_thread->jlThread = jlThread;
 
         #ifdef TARGET_LINUX
         pthread_mutex_init(&new_thread->notify_mutex, NULL);
@@ -145,6 +154,7 @@ Thread_t* thread_alloc(){
     return new_thread;
 }
 
+void thread_exit();
 #ifdef TARGET_LINUX
 static void*
 #else
@@ -155,22 +165,61 @@ thread_task(void* params){
     s_current_thread = thread;
 
     atomic_fetch_add_explicit(&s_active_threads, 1, memory_order_seq_cst);
-    interpreter_ctx_init(&thread->interpreter);
+    Interpreter_t* interpreter = interpreter_ctx_init(thread, &thread->interpreter);
     heap_gc_thread_register(thread);
 
     if(thread->init) thread->init();
 
     Method_t* method = ((void**)params)[1];
     int32_t* method_args = ((void**)params)[2];
-
-
-    InterpreterFrame_t* launch_frame = interpreter_frame_push(method);
+    
+    InterpreterFrame_t* launch_frame = interpreter_frame_push(interpreter, method);
     assert(launch_frame);
 
     memcpy(launch_frame->locals, method_args, method->args_slots * sizeof(int32_t));
-    interpreter_execute();
+    if(interpreter_execute(interpreter) != JERR_OK){
+        thread_safepoint_request();
+        assert(0 && "Thread had unrecoverable error");
+    }
 
-    thread_kill();
+    Field_t* VMThread_field = NULL;
+    int32_t* jlThread_storage = NULL;
+    if(thread->jlThread){
+        if((VMThread_field = class_find_instance_field(thread->jlThread->class, stringpool_add("VMThread@J")))){
+            if(heap_class_object_get_fields(thread->jlThread, &jlThread_storage) == JERR_OK){
+                memset(&jlThread_storage[VMThread_field->offset], 0, VMThread_field->size);
+            }
+        }
+    }
+
+    /*Error_t err = JERR_OK;
+    if((err = interpreter_execute()) != JERR_OK){
+        printf("VM ERROR: %d. VM will exit and reinit!\n", err);
+
+        thread_safepoint_request(); //Begin the exterminatus
+
+        Thread_t *thread = NULL, *tmp = NULL;
+        list_for_each_entry_safe(thread, tmp, &s_safepoint_threads, list){
+            #ifdef TARGET_LINUX
+            pthread_cancel(thread->task);
+            pthread_join(thread->task, NULL);
+            #else
+            static_assert("TODO: freeRTOS");
+            #endif
+
+            list_del_init(&thread->list);
+            heap_gc_thread_unregister(thread);
+            free(thread);
+        }
+
+        thread_safepoint_release();
+    }*/
+
+    thread_exit();
+
+    #ifdef TARGET_LINUX
+    return NULL;
+    #endif
 }
 
 void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
@@ -185,9 +234,7 @@ void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
     #endif
 }
 
-void thread_free(Thread_t* thread);
-
-_Noreturn void thread_kill(){
+_Noreturn void thread_exit(){
     atomic_fetch_sub_explicit(&s_active_threads, 1, memory_order_seq_cst);
 
     Thread_t* thread = thread_self_get();
@@ -197,7 +244,8 @@ _Noreturn void thread_kill(){
         thread_notify_send(wakeup);
     }
 
-    thread_free(thread);
+    heap_gc_thread_unregister(thread);
+    free(thread);
 
     #ifdef TARGET_LINUX
     pthread_detach(pthread_self());
@@ -207,10 +255,6 @@ _Noreturn void thread_kill(){
     #endif
 }
 
-void thread_free(Thread_t* thread){
-    heap_gc_thread_unregister(thread);
-    free(thread);
-}
 
 void thread_join(Thread_t* join_to){
     Thread_t* thread = thread_self_get();

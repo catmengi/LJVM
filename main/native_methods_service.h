@@ -19,6 +19,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
+#include "interpreter.h"
 #include "jerror.h"
 #include "thread.h"
 #include <stdint.h>
@@ -30,7 +31,7 @@ typedef struct{
     char value[sizeof(int64_t)]; //Used in case when err == JERR_OK / JERR_EXCEPTION
 }NativeMethodReturnValue_t;
 
-typedef NativeMethodReturnValue_t (*NativeMethod_t)(Thread_t* thread, Method_t* self, int32_t* args);
+typedef NativeMethodReturnValue_t (*NativeMethod_t)(Interpreter_t* ctx, Method_t* self, int32_t* args);
 
 typedef struct{
     char* name; //In mangled form: name@()V for example 

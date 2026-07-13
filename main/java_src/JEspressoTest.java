@@ -20,18 +20,10 @@ public class JEspressoTest {
 
     public static void debug() throws IOException{
 
+        String s = "Проверка UTF8, everything is in check!\n";
+
         while(true){
-            byte test[] = new byte[512];
-
-            for (int i = 0; i < test.length; i++) {
-                test[i] = (byte) ((i % (127 - 32)) + 32);
-            }
-
-            test[test.length - 1] = 10;
-
-            try {
-                ns.write(test);
-            } catch (Throwable t) {throw t;}
+            System.out.print(s);
         }
     }
 }

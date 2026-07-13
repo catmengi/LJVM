@@ -42,6 +42,7 @@ typedef enum{
     JERR_NEGATIVESIZE,
     JERR_INDEXOOB,
     JERR_CAST,
+    JERR_STACKOVERFLOW,
 
     JERR_UNKNOWN,
 }Error_t;
@@ -51,7 +52,7 @@ typedef enum{
 //This macro is not entriely means error, it might used for better looking error code propagation (JERR_SCHEDULE is one of the examples)
 #ifdef __FSJ_DO_BREAK__
     static void FSJ_BREAK(){}
-    #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); printf("%s:%d ERROR HAPPENED, CODE: %d\n",__PRETTY_FUNCTION__,__LINE__,(unsigned)(size_t)(value)); FSJ_BREAK(); goto label;}}
+    #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); FSJ_BREAK(); goto label;}}
 #else
     #define FAIL_SET_JUMP(expression, var, value, label) {if(!(expression)){(var) = (value); goto label;}}
 #endif

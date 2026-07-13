@@ -4,14 +4,6 @@ import java.io.*;
 
 
 public class NativeOutputStream extends OutputStream{
-    private class IOState{
-        int offset;
-        int length;
-
-        byte[] buf;
-    };
-
-    private IOState io_state = null;
     private int fd = 0;
     private static native int open(String path, int flags);
 
@@ -27,7 +19,11 @@ public class NativeOutputStream extends OutputStream{
     public native void close();
     public native void flush();
     
-    public native void write(byte[] b);
+    public static native void write_fd(int fd, byte[] b);
+
+    public void write(byte[] b){
+        write_fd(this.fd, b);
+    }
 
     //public native void write(int b);
     //public native void write(byte[] b, int off, int len);

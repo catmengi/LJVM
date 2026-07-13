@@ -19,28 +19,18 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
-#define TARGET_LINUX
-//#define TARGET_ESPIDF
+#include "bumper.h"
+#include "list.h"
 
-#define KB * 1024
-#define MB * 1024 * 1024
+typedef struct{
+    struct list_head list;
+    int id;
 
-#define VM_ARENA_SIZE (4096 + 256) KB //Memory allocated for whole VM (+ memory for sub arena metadata)
+    bump_allocator_t arena;
+}MemmanChunk_t;
 
-#define VM_PERMA_ARENA_SIZE ((1024 + 512) KB)
-#define VM_LINKER_TMP_ARENA_SIZE 256 KB
-#define VM_PARSER_ARENA_SIZE 256 KB
-#define VM_GC_ARENA_SIZE 2 MB
-#define STRINGPOOL_ENTRY_ITEMS_COUNT 1024
-#define CLASSTABLE_ENTRY_ITEMS_COUNT 1024
+void memman_init();
 
-#define VM_PERMA_ARENA_ID 15923
-#define VM_LINKER_TMP_ARENA_ID 6647
-#define VM_GC_ARENA_ID 1156
-#define VM_PARSER_ARENA_ID 1984
-
-#define THREAD_STACK_SIZE 8 KB
-#define THREAD_LOWEST_QUOTA 64
-#define THREAD_DEFAULT_PRIORITY 5
-
-void JEspresso_init();
+//WARNING: it does NOT check for existance of the arena with same ID
+bump_allocator_t* memman_create(int id, size_t size);
+bump_allocator_t* memman_get(int id);

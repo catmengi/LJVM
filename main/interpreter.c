@@ -203,15 +203,10 @@ static int s_exception_nameid[JERR_UNKNOWN - JERR_NOCLASSDEF] = {0};
 })
 
 #define STACK_PUSH_LONG(frame, value) ({ \
-    uint64_t _v = (value); \
-    uint32_t _high = (uint32_t)(_v >> 32); \
-    uint32_t _low  = (uint32_t)_v; \
-    (frame)->stack[(frame)->sp] = _high; \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
-    (frame)->sp++; \
-    (frame)->stack[(frame)->sp] = _low; \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
-    (frame)->sp++; \
+    *(int64_t*)(&(frame)->stack[frame->sp]) = value;\
+    (frame)->sp += 2;\
 })
 
 #define STACK_PUSH_DOUBLE(frame, value) ({ \
@@ -220,13 +215,9 @@ static int s_exception_nameid[JERR_UNKNOWN - JERR_NOCLASSDEF] = {0};
 })
 
 #define STACK_POP_LONG(frame) ({ \
-    (frame)->sp--; \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
-    uint32_t _low = (frame)->stack[(frame)->sp]; \
-    (frame)->sp--; \
     SHADOW_CLEAR_REF((frame)->shadow_stack, (frame)->sp); \
-    uint32_t _high = (frame)->stack[(frame)->sp]; \
-    ((uint64_t)_high << 32) | _low; \
+    *(int64_t*)(&(frame)->stack[(frame)->sp -= 2]);\
 })
 
 #define STACK_POP_DOUBLE(frame) ({ \
@@ -252,12 +243,8 @@ static int s_exception_nameid[JERR_UNKNOWN - JERR_NOCLASSDEF] = {0};
 })
 
 #define LOCAL_STORE_LONG(frame, value, idx) ({ \
-    uint64_t _v = (value); \
-    uint32_t _high = (uint32_t)(_v >> 32); \
-    uint32_t _low  = (uint32_t)_v; \
-    (frame)->locals[idx] = _high; \
+    *(int64_t*)(&(frame)->locals[idx]) = value; \
     SHADOW_CLEAR_REF((frame)->shadow_locals, idx); \
-    (frame)->locals[idx + 1] = _low; \
     SHADOW_CLEAR_REF((frame)->shadow_locals, idx + 1); \
 })
 
@@ -280,9 +267,7 @@ static int s_exception_nameid[JERR_UNKNOWN - JERR_NOCLASSDEF] = {0};
 })
 
 #define LOCAL_LOAD_LONG(frame, idx) ({ \
-    uint32_t _high = (frame)->locals[idx]; \
-    uint32_t _low  = (frame)->locals[idx + 1]; \
-    ((uint64_t)_high << 32) | _low; \
+    (int64_t)(frame)->locals[idx];\
 })
 
 #define LOCAL_LOAD_DOUBLE(frame, idx) ({ \
@@ -362,20 +347,23 @@ void interpreter_init(){
     s_exception_nameid[error_to_exception_nameid_index(JERR_NEGATIVESIZE)] = stringpool_add("java/lang/NegativeArraySizeException");
     s_exception_nameid[error_to_exception_nameid_index(JERR_INDEXOOB)] = stringpool_add("java/lang/ArrayIndexOutOfBoundsException");
     s_exception_nameid[error_to_exception_nameid_index(JERR_CAST)] = stringpool_add("java/lang/ClassCastException");
+    s_exception_nameid[error_to_exception_nameid_index(JERR_STACKOVERFLOW)] = stringpool_add("java/lang/StackOverflowError");
 }
 
-void interpreter_ctx_init(Interpreter_t* ctx){
+Interpreter_t* interpreter_ctx_init(Thread_t* thread, Interpreter_t* ctx){
     bumper_create_from(&ctx->arena, ctx->stackbuf, sizeof(ctx->stackbuf));
+    ctx->frame_count = 0;
+    ctx->thread = thread; //Its done like this, so thread can be NULL!
     ctx->frame = NULL;
+
+    return ctx;
 }
 
 static inline int int_ceil(int n, int d) {
     return (n + d - 1) / d;
 }
 
-InterpreterFrame_t* interpreter_frame_push(Method_t* method){
-    Interpreter_t* ctx = &thread_self_get()->interpreter;
-
+InterpreterFrame_t* interpreter_frame_push(Interpreter_t* ctx, Method_t* method){
     MethodBytecode_t* bytecode = method->code; //Assumption that method is bytecode, not native
     size_t size = (bytecode->max_locals + bytecode->max_stack + int_ceil(bytecode->max_stack, 32) + int_ceil(bytecode->max_locals, 32)) * sizeof(int32_t) + sizeof(InterpreterFrame_t);
 
@@ -402,24 +390,23 @@ InterpreterFrame_t* interpreter_frame_push(Method_t* method){
     frame->prev = ctx->frame;
 
     ctx->frame = frame;
+    ctx->frame_count++;
 
     return frame;
 }
 
-InterpreterFrame_t* interpreter_frame_pop(){
-    Interpreter_t* ctx = &thread_self_get()->interpreter;
-
+InterpreterFrame_t* interpreter_frame_pop(Interpreter_t* ctx){
     if(ctx->frame){
         InterpreterFrame_t* frame = ctx->frame;
+        ctx->frame_count--;
         ctx->frame = frame->prev;
         bumper_unwind(&ctx->arena, frame->size);
-
     }
     return ctx->frame;
 }
 
-InterpreterFrame_t* interpreter_frame_get(){
-    return thread_self_get()->interpreter.frame;
+InterpreterFrame_t* interpreter_frame_get(Interpreter_t* ctx){
+    return ctx->frame;
 }
 
 static bool check_arguments(Method_t* method, uint32_t* shadow_stack, uint32_t sp){
@@ -430,11 +417,9 @@ static bool check_arguments(Method_t* method, uint32_t* shadow_stack, uint32_t s
     return true;
 }
 
-static Error_t native_method_invoke(InterpreterFrame_t* frame, Method_t* method){
-    Thread_t* thread = thread_self_get();
-
+static Error_t native_method_invoke(Interpreter_t* ctx, InterpreterFrame_t* frame, Method_t* method){
     int32_t* args = &frame->stack[frame->sp - method->args_slots];
-    NativeMethodReturnValue_t retval = ((NativeMethod_t)method->code)(thread,method,args);
+    NativeMethodReturnValue_t retval = ((NativeMethod_t)method->code)(ctx,method,args);
 
     switch(retval.err){
         case JERR_OK:
@@ -450,44 +435,46 @@ static Error_t native_method_invoke(InterpreterFrame_t* frame, Method_t* method)
     }
 }
 
-Error_t interpreter_method_invoke(Method_t* method, int32_t* arguments, void* return_value){
+Error_t interpreter_method_invoke(Interpreter_t* ctx, Method_t* method, int32_t* arguments, void* return_value){
     Error_t err = JERR_OK;
 
     FAIL_SET_JUMP(method && (arguments || method->args_slots == 0) && (return_value || method->return_type == TYPE_VOID), err, JERR_BADPARAM, exit);
-    InterpreterFrame_t* retstub = interpreter_frame_push(&(Method_t){.code = 
+    InterpreterFrame_t* retstub = interpreter_frame_push(ctx, &(Method_t){.code = 
                                                 &(MethodBytecode_t){.code_length = 2,
                                                                     .code = (uint8_t[3]){EJOPCODE_NOP,EJOPCODE_NOP, EJOPCODE_INTERPRETEREXIT},
                                                                     .max_stack = 2 + method->flags.is_native ? method->args_slots : 0,
                                                                    }, .args_bitmap_size = 0});
+    FAIL_SET_JUMP(retstub, err, JERR_STACKOVERFLOW, exit);
     if(method->flags.is_native){
         assert(0 && "TODO:");
     } else {
-        InterpreterFrame_t* frame = interpreter_frame_push(method);
+        InterpreterFrame_t* frame = interpreter_frame_push(ctx, method);
+        FAIL_SET_JUMP(frame, err, JERR_STACKOVERFLOW, exit);
+
         memcpy(frame->locals, arguments, method->args_slots * sizeof(int32_t));
 
-        FAIL_SET_JUMP((err = interpreter_execute()) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = interpreter_execute(ctx)) == JERR_OK, err, err, exit);
     }
     STACK_POP_GENERIC(retstub, method->return_type, return_value);
-    interpreter_frame_pop(); //Delete retstub
+    interpreter_frame_pop(ctx); //Delete retstub
 
 exit:   
     return err;
 }
 
-static void frame_unlock_monitors(InterpreterFrame_t* frame, Thread_t* thread){
+static void frame_unlock_monitors(InterpreterFrame_t* frame){
     Monitor_t *monitor = NULL, *tmp = NULL;
     list_for_each_entry_safe(monitor, tmp, &frame->held_monitors, list){
         assert(monitor_exit_force(monitor) == JERR_OK);
     }
 }
 
-Error_t throw_exception(Object_t* exception_object){
-    Thread_t* thread = thread_self_get();
+Error_t throw_exception(Interpreter_t* ctx, Object_t* exception_object){
     size_t unwind_by = 0;
     //TODO: prepare stack trace!
 
-    Interpreter_t* interpreter = &thread->interpreter;
-    for(InterpreterFrame_t* frame = interpreter->frame; frame; frame = frame->prev, interpreter->frame = frame, frame_unlock_monitors(frame, thread)){
+    Interpreter_t* interpreter = ctx;
+    for(InterpreterFrame_t* frame = interpreter->frame; frame; frame = frame->prev, interpreter->frame = frame, frame_unlock_monitors(frame)){
         MethodBytecode_t* bytecode = frame->method->code;
 
         for(unsigned i = 0; i < bytecode->exception_count; i++){
@@ -495,9 +482,9 @@ Error_t throw_exception(Object_t* exception_object){
             if(exception->start_pc + bytecode->code <= frame->pc && exception->end_pc + bytecode->code > frame->pc){
                 ClassSymbol_t* exception_type_symbol = exception->type;
 
-                if(exception_type_symbol == NULL || class_resolv_symbol(exception_type_symbol) == JERR_OK){
+                if(exception_type_symbol == NULL || class_resolv_symbol(ctx, exception_type_symbol) == JERR_OK){
                     if(exception_type_symbol == NULL || class_is_compatible(exception_object->class,exception_type_symbol->value)){
-                        bumper_unwind(&thread->interpreter.arena, unwind_by);
+                        bumper_unwind(&interpreter->arena, unwind_by);
 
                         frame->pc = bytecode->code + exception->handler_pc;
                         frame->sp = 0;
@@ -515,9 +502,9 @@ Error_t throw_exception(Object_t* exception_object){
     return JERR_UNHANDLED_EXCEPTION;
 }
 
-Error_t interpreter_execute(){
+Error_t interpreter_execute(Interpreter_t* ctx){
     Error_t err = JERR_OK;
-    InterpreterFrame_t* frame = interpreter_frame_get();
+    InterpreterFrame_t* frame = interpreter_frame_get(ctx);
 
     static const JavaValueType_t sym_to_value_type[] = {
         [SYMBOL_INT] = TYPE_INT,
@@ -542,6 +529,18 @@ Error_t interpreter_execute(){
         [EJOPCODE_FLOAD_2] = &&EJOPCODE_FLOAD_2,
         [EJOPCODE_FLOAD_3] = &&EJOPCODE_FLOAD_3,
 
+        [EJOPCODE_LLOAD]   = &&EJOPCODE_LLOAD,
+        [EJOPCODE_LLOAD_0] = &&EJOPCODE_LLOAD_0,
+        [EJOPCODE_LLOAD_1] = &&EJOPCODE_LLOAD_1,
+        [EJOPCODE_LLOAD_2] = &&EJOPCODE_LLOAD_2,
+        [EJOPCODE_LLOAD_3] = &&EJOPCODE_LLOAD_3,
+
+        [EJOPCODE_DLOAD]   = &&EJOPCODE_DLOAD,
+        [EJOPCODE_DLOAD_0] = &&EJOPCODE_DLOAD_0,
+        [EJOPCODE_DLOAD_1] = &&EJOPCODE_DLOAD_1,
+        [EJOPCODE_DLOAD_2] = &&EJOPCODE_DLOAD_2,
+        [EJOPCODE_DLOAD_3] = &&EJOPCODE_DLOAD_3,
+
         [EJOPCODE_ALOAD]   = &&EJOPCODE_ALOAD,
         [EJOPCODE_ALOAD_0] = &&EJOPCODE_ALOAD_0,
         [EJOPCODE_ALOAD_1] = &&EJOPCODE_ALOAD_1,
@@ -562,6 +561,18 @@ Error_t interpreter_execute(){
         [EJOPCODE_FSTORE_2] = &&EJOPCODE_FSTORE_2,
         [EJOPCODE_FSTORE_3] = &&EJOPCODE_FSTORE_3,
 
+        [EJOPCODE_LSTORE]   = &&EJOPCODE_LSTORE,
+        [EJOPCODE_LSTORE_0] = &&EJOPCODE_LSTORE_0,
+        [EJOPCODE_LSTORE_1] = &&EJOPCODE_LSTORE_1,
+        [EJOPCODE_LSTORE_2] = &&EJOPCODE_LSTORE_2,
+        [EJOPCODE_LSTORE_3] = &&EJOPCODE_LSTORE_3,
+
+        [EJOPCODE_DSTORE]   = &&EJOPCODE_DSTORE,
+        [EJOPCODE_DSTORE_0] = &&EJOPCODE_DSTORE_0,
+        [EJOPCODE_DSTORE_1] = &&EJOPCODE_DSTORE_1,
+        [EJOPCODE_DSTORE_2] = &&EJOPCODE_DSTORE_2,
+        [EJOPCODE_DSTORE_3] = &&EJOPCODE_DSTORE_3,
+
         [EJOPCODE_ASTORE]   = &&EJOPCODE_ASTORE,
         [EJOPCODE_ASTORE_0] = &&EJOPCODE_ASTORE_0,
         [EJOPCODE_ASTORE_1] = &&EJOPCODE_ASTORE_1,
@@ -576,6 +587,9 @@ Error_t interpreter_execute(){
         [EJOPCODE_ICONST_4]   = &&EJOPCODE_ICONST_4,
         [EJOPCODE_ICONST_5]   = &&EJOPCODE_ICONST_5,
         [EJOPCODE_ICONST_M1]  = &&EJOPCODE_ICONST_M1,
+
+        [EJOPCODE_LCONST_0]   = &&EJOPCODE_LCONST_0,
+        [EJOPCODE_LCONST_1]   = &&EJOPCODE_LCONST_1,
 
         [EJOPCODE_PUTSTATIC]  = &&EJOPCODE_PUTSTATIC,
         [EJOPCODE_GETSTATIC]  = &&EJOPCODE_GETSTATIC,
@@ -778,6 +792,40 @@ Error_t interpreter_execute(){
         STACK_PUSH_FLOAT(frame, LOCAL_LOAD_FLOAT(frame, 3));
         NEXT();
 
+    EJOPCODE_LLOAD:
+        STACK_PUSH_LONG(frame, LOCAL_LOAD_LONG(frame, *(frame->pc + 1)));
+        NEXT();
+
+    EJOPCODE_LLOAD_0:
+        STACK_PUSH_LONG(frame, LOCAL_LOAD_LONG(frame, 0));
+        NEXT();
+    EJOPCODE_LLOAD_1:
+        STACK_PUSH_LONG(frame, LOCAL_LOAD_LONG(frame, 1));
+        NEXT();
+    EJOPCODE_LLOAD_2:
+        STACK_PUSH_LONG(frame, LOCAL_LOAD_LONG(frame, 2));
+        NEXT();
+    EJOPCODE_LLOAD_3:
+        STACK_PUSH_LONG(frame, LOCAL_LOAD_LONG(frame, 3));
+        NEXT();
+
+    EJOPCODE_DLOAD:
+        STACK_PUSH_DOUBLE(frame, LOCAL_LOAD_DOUBLE(frame, *(frame->pc + 1)));
+        NEXT();
+
+    EJOPCODE_DLOAD_0:
+        STACK_PUSH_DOUBLE(frame, LOCAL_LOAD_DOUBLE(frame, 0));
+        NEXT();
+    EJOPCODE_DLOAD_1:
+        STACK_PUSH_DOUBLE(frame, LOCAL_LOAD_DOUBLE(frame, 1));
+        NEXT();
+    EJOPCODE_DLOAD_2:
+        STACK_PUSH_DOUBLE(frame, LOCAL_LOAD_DOUBLE(frame, 2));
+        NEXT();
+    EJOPCODE_DLOAD_3:
+        STACK_PUSH_DOUBLE(frame, LOCAL_LOAD_DOUBLE(frame, 3));
+        NEXT();
+
     EJOPCODE_ALOAD:
         STACK_PUSH_REF(frame, LOCAL_LOAD_REF(frame, *(frame->pc + 1)));
         NEXT();
@@ -814,6 +862,38 @@ Error_t interpreter_execute(){
         NEXT();
     EJOPCODE_ISTORE_3:
         LOCAL_STORE_INT(frame, STACK_POP_INT(frame), 3);
+        NEXT();
+
+    EJOPCODE_LSTORE:
+        LOCAL_STORE_LONG(frame, STACK_POP_LONG(frame), *(frame->pc + 1));
+        NEXT();
+    EJOPCODE_LSTORE_0:
+        LOCAL_STORE_LONG(frame, STACK_POP_LONG(frame), 0);
+        NEXT();
+    EJOPCODE_LSTORE_1:
+        LOCAL_STORE_LONG(frame, STACK_POP_LONG(frame), 1);
+        NEXT();
+    EJOPCODE_LSTORE_2:
+        LOCAL_STORE_LONG(frame, STACK_POP_LONG(frame), 2);
+        NEXT();
+    EJOPCODE_LSTORE_3:
+        LOCAL_STORE_LONG(frame, STACK_POP_LONG(frame), 3);
+        NEXT();
+
+    EJOPCODE_DSTORE:
+        LOCAL_STORE_DOUBLE(frame, STACK_POP_DOUBLE(frame), *(frame->pc + 1));
+        NEXT();
+    EJOPCODE_DSTORE_0:
+        LOCAL_STORE_DOUBLE(frame, STACK_POP_DOUBLE(frame), 0);
+        NEXT();
+    EJOPCODE_DSTORE_1:
+        LOCAL_STORE_DOUBLE(frame, STACK_POP_DOUBLE(frame), 1);
+        NEXT();
+    EJOPCODE_DSTORE_2:
+        LOCAL_STORE_DOUBLE(frame, STACK_POP_DOUBLE(frame), 2);
+        NEXT();
+    EJOPCODE_DSTORE_3:
+        LOCAL_STORE_DOUBLE(frame, STACK_POP_DOUBLE(frame), 3);
         NEXT();
 
     EJOPCODE_FSTORE:
@@ -873,6 +953,13 @@ Error_t interpreter_execute(){
         STACK_PUSH_INT(frame, -1);
         NEXT();
 
+    EJOPCODE_LCONST_0:
+        STACK_PUSH_LONG(frame, 0);
+        NEXT();
+    EJOPCODE_LCONST_1:
+        STACK_PUSH_LONG(frame, 1);
+        NEXT();
+
     EJOPCODE_BIPUSH:
         STACK_PUSH_INT(frame, (int32_t)*(int8_t*)(frame->pc + 1));
         NEXT();
@@ -890,7 +977,7 @@ Error_t interpreter_execute(){
             FAIL_SET_JUMP((err = monitor_exit(sync_object->monitor)) == JERR_OK, err, err, exit);
         }
 
-        if (!(frame = interpreter_frame_pop())) return JERR_OK;
+        if (!(frame = interpreter_frame_pop(ctx))) return JERR_OK;
         NEXT();
     }
 
@@ -903,7 +990,7 @@ Error_t interpreter_execute(){
         }
 
         int32_t ret = STACK_POP_INT(frame);
-        if (!(frame = interpreter_frame_pop()))
+        if (!(frame = interpreter_frame_pop(ctx)))
             return JERR_ORPHAN_RETURN;
         STACK_PUSH_INT(frame, ret);
         NEXT();
@@ -918,7 +1005,7 @@ Error_t interpreter_execute(){
         }
 
         float ret = STACK_POP_FLOAT(frame);
-        if (!(frame = interpreter_frame_pop()))
+        if (!(frame = interpreter_frame_pop(ctx)))
             return JERR_ORPHAN_RETURN;
         STACK_PUSH_FLOAT(frame, ret);
         NEXT();
@@ -933,7 +1020,7 @@ Error_t interpreter_execute(){
         }
 
         void* ret = STACK_POP_REF(frame);
-        if (!(frame = interpreter_frame_pop()))
+        if (!(frame = interpreter_frame_pop(ctx)))
             return JERR_ORPHAN_RETURN;
         STACK_PUSH_REF(frame, ret);
         NEXT();
@@ -948,7 +1035,7 @@ Error_t interpreter_execute(){
         }
 
         uint64_t ret = STACK_POP_LONG(frame);
-        if (!(frame = interpreter_frame_pop()))
+        if (!(frame = interpreter_frame_pop(ctx)))
             return JERR_ORPHAN_RETURN;
         STACK_PUSH_LONG(frame, ret);
         NEXT();
@@ -963,7 +1050,7 @@ Error_t interpreter_execute(){
         }
 
         double ret = STACK_POP_DOUBLE(frame);
-        if (!(frame = interpreter_frame_pop()))
+        if (!(frame = interpreter_frame_pop(ctx)))
             return JERR_ORPHAN_RETURN;
         STACK_PUSH_DOUBLE(frame, ret);
         NEXT();
@@ -973,7 +1060,7 @@ Error_t interpreter_execute(){
     // ========== FIELD ACCESS ==========
     EJOPCODE_PUTSTATIC: {
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Field_t* field = sym->value;
@@ -987,7 +1074,7 @@ Error_t interpreter_execute(){
 
     EJOPCODE_GETSTATIC: {
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Field_t* field = sym->value;
@@ -996,7 +1083,7 @@ Error_t interpreter_execute(){
         void* value = &field->class->storage[field->offset];
 
         if (field->constantvalue) {
-            FAIL_SET_JUMP((err = class_resolv_symbol(field->constantvalue)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = class_resolv_symbol(ctx, field->constantvalue)) == JERR_OK, err, err, exit);
             memcpy(value, (field->constantvalue->type == SYMBOL_STRING) ? &field->constantvalue->value : field->constantvalue->value,
                    ((field->type == TYPE_LONG || field->type == TYPE_DOUBLE) ? 2 : 1) * sizeof(int32_t));
             field->constantvalue = NULL;
@@ -1008,7 +1095,7 @@ Error_t interpreter_execute(){
     
     EJOPCODE_GETFIELD:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Field_t* field = sym->value;
@@ -1030,7 +1117,7 @@ Error_t interpreter_execute(){
 
     EJOPCODE_PUTFIELD:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Field_t* field = sym->value;
@@ -1056,7 +1143,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = sym->value;
@@ -1064,11 +1151,12 @@ Error_t interpreter_execute(){
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
         if (!method->flags.is_native) {
-            InterpreterFrame_t* new_frame = interpreter_frame_push(method);
-            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+            InterpreterFrame_t* new_frame = interpreter_frame_push(ctx, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             FAIL_SET_JUMP(check_arguments(method, frame->shadow_stack, frame->sp - method->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
             if(method->flags.is_syncronized){
+                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1078,7 +1166,7 @@ Error_t interpreter_execute(){
             frame = new_frame;
             goto *opcode_labels[*frame->pc];
         } else {
-            FAIL_SET_JUMP((err = native_method_invoke(frame, method)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = native_method_invoke(ctx, frame, method)) == JERR_OK, err, err, exit);
             NEXT();
         }
     }
@@ -1087,7 +1175,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = sym->value;
@@ -1095,11 +1183,12 @@ Error_t interpreter_execute(){
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
         if (!method->flags.is_native){
-            InterpreterFrame_t* new_frame = interpreter_frame_push(method);
-            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+            InterpreterFrame_t* new_frame = interpreter_frame_push(ctx, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             FAIL_SET_JUMP(check_arguments(method, frame->shadow_stack, frame->sp - method->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
             if(method->flags.is_syncronized){
+                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1110,7 +1199,7 @@ Error_t interpreter_execute(){
             frame = new_frame;
             goto *opcode_labels[*frame->pc];
         } else {
-            FAIL_SET_JUMP((err = native_method_invoke(frame, method)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = native_method_invoke(ctx, frame, method)) == JERR_OK, err, err, exit);
             NEXT();
         }
     }
@@ -1119,7 +1208,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* template = sym->value;
@@ -1138,10 +1227,11 @@ Error_t interpreter_execute(){
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
         if (!method->flags.is_native) {
-            InterpreterFrame_t* new_frame = interpreter_frame_push(method);
-            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+            InterpreterFrame_t* new_frame = interpreter_frame_push(ctx, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             if(method->flags.is_syncronized){
+                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
             
@@ -1151,7 +1241,7 @@ Error_t interpreter_execute(){
             frame = new_frame;
             goto *opcode_labels[*frame->pc];
         } else {
-            FAIL_SET_JUMP((err = native_method_invoke(frame, method)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = native_method_invoke(ctx, frame, method)) == JERR_OK, err, err, exit);
             NEXT();
         }
     }
@@ -1160,7 +1250,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
         Method_t* template = sym->value;
@@ -1186,10 +1276,11 @@ Error_t interpreter_execute(){
 
 
         if (!method->flags.is_native) {
-            InterpreterFrame_t* new_frame = interpreter_frame_push(method);
-            FAIL_SET_JUMP(new_frame, err, JERR_OOM, exit);
+            InterpreterFrame_t* new_frame = interpreter_frame_push(ctx, method);
+            FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             if(method->flags.is_syncronized){
+                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1199,7 +1290,7 @@ Error_t interpreter_execute(){
             frame = new_frame;
             goto *opcode_labels[*frame->pc];
         } else {
-            FAIL_SET_JUMP((err = native_method_invoke(frame, method)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = native_method_invoke(ctx, frame, method)) == JERR_OK, err, err, exit);
             NEXT();
         }
     }
@@ -1224,12 +1315,12 @@ Error_t interpreter_execute(){
     EJOPCODE_IF_ICMPGE: IF_CMP(>=);
 
     // ========== INTEGER ARITHMETIC ==========
-    #define BINARY_INT(OP) do { \
+    #define BINARY_INT(OP) ({ \
         int32_t v2 = STACK_POP_INT(frame); \
         int32_t v1 = STACK_POP_INT(frame); \
         STACK_PUSH_INT(frame, v1 OP v2); \
         NEXT(); \
-    } while (0)
+    })
 
     EJOPCODE_IADD: BINARY_INT(+);
     EJOPCODE_ISUB: BINARY_INT(-);
@@ -1339,7 +1430,7 @@ Error_t interpreter_execute(){
 
     EJOPCODE_LDC:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint8_t*)(frame->pc + 1)];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
 
         switch(sym->type){
             default:
@@ -1365,7 +1456,7 @@ Error_t interpreter_execute(){
     EJOPCODE_LDC2_W:
     EJOPCODE_LDC_W:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
 
         switch(sym->type){
             default:
@@ -1392,7 +1483,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
         Class_t* class = sym->value;
         
@@ -1425,7 +1516,7 @@ Error_t interpreter_execute(){
         Object_t* array = NULL;
         Class_t* array_class = NULL;
         char class_name[3] = {'[',type_mapping[type],'\0'};
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(class_name), &array_class)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add(class_name), &array_class)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, err, exit);
 
         STACK_PUSH_REF(frame, array);
@@ -1437,7 +1528,7 @@ Error_t interpreter_execute(){
         thread_safepoint_check();
 
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
 
         Class_t* element_class = sym->value;
@@ -1459,7 +1550,7 @@ Error_t interpreter_execute(){
 
         Class_t* array_class = NULL;
         Object_t* array = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(array_class_name), &array_class)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add(array_class_name), &array_class)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, err, exit);
 
         STACK_PUSH_REF(frame, array);
@@ -1780,6 +1871,8 @@ Error_t interpreter_execute(){
     }
 
     EJOPCODE_MONITORENTER:{
+        assert(ctx->thread && "Cannot be run from bootstrap context");
+
         FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - 1])) == JERR_OK, err, err, exit);
        
@@ -1788,6 +1881,8 @@ Error_t interpreter_execute(){
     }
 
     EJOPCODE_MONITOREXIT:{
+        assert(ctx->thread && "Cannot be run from bootstrap context");
+        
         FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP((Object_t*)frame->stack[frame->sp - 1], err, JERR_NULLPOINTER, exit);
 
@@ -1799,7 +1894,7 @@ Error_t interpreter_execute(){
 
     EJOPCODE_INSTANCEOF:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
 
         Object_t* object = STACK_POP_REF(frame);
@@ -1811,7 +1906,7 @@ Error_t interpreter_execute(){
 
     EJOPCODE_CHECKCAST:{
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
-        FAIL_SET_JUMP((err = class_resolv_symbol(sym)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
         
         Object_t* object = STACK_POP_REF(frame);
@@ -2242,7 +2337,7 @@ Error_t interpreter_execute(){
         NEXT();
     }
 
-    #define IF_ZERO(OP) do { \
+    #define IF_ZERO(OP) ({ \
         thread_safepoint_check();\
         int32_t v = STACK_POP_INT(frame); \
         int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)); \
@@ -2251,7 +2346,7 @@ Error_t interpreter_execute(){
             goto *opcode_labels[*frame->pc]; \
         } \
         NEXT(); \
-    } while (0)
+    })
 
     EJOPCODE_IFEQ:
         IF_ZERO(==);
@@ -2279,15 +2374,20 @@ exit:
         Object_t* exception = err == JERR_EXCEPTION ? STACK_POP_REF(frame) : NULL;
         if(!exception){
             Class_t* exception_class = NULL;
-            FAIL_SET_JUMP((err = class_load_bynameid(error_to_exception_nameid(err), &exception_class)) == JERR_OK, err, err, exit); //Oh, this is cursed
+            FAIL_SET_JUMP((err = class_load_bynameid(ctx, error_to_exception_nameid(err), &exception_class)) == JERR_OK, err, err, exit); //Oh, this is cursed
             FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
-            FAIL_SET_JUMP((err = interpreter_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL)) == JERR_OK, err, err, exit);            
+            FAIL_SET_JUMP((err = interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL)) == JERR_OK, err, err, exit);            
         }
 
-        FAIL_SET_JUMP((err = throw_exception(exception)) == JERR_OK, err, err, exit);
-        frame = interpreter_frame_get();
+        FAIL_SET_JUMP((err = throw_exception(ctx, exception)) == JERR_OK, err, err, exit);
+        frame = interpreter_frame_get(ctx);
 
         goto *opcode_labels[*frame->pc];
+    }
+
+    //Unlock all monitors in case of diyng
+    for(InterpreterFrame_t* cur = frame; cur; cur = cur->prev){
+        frame_unlock_monitors(cur);
     }
     return err;
 }

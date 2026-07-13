@@ -18,12 +18,15 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "monitor.h"
+#include "bumper.h"
 #include "config.h"
 #include "heap.h"
 #include "jerror.h"
 #include "thread.h"
+#include "memman.h"
 
 #include <limits.h>
+#include <assert.h>
 
 #ifdef TARGET_ESPIDF
 #include "freertos/freeRTOS.h"
@@ -34,9 +37,8 @@ static SemaphoreHandle_t s_monitor_lock = NULL;
 static pthread_mutex_t s_monitor_lock = {0};
 #endif
 
-static Monitor_t s_monitors[MAX_MONITORS] = {0};
+static bump_allocator_t* s_arena = NULL;
 static struct list_head s_free_monitors;
-static bool is_initialised = false;
 
 //=============== INTERNAL HELPERS ===============
 static void monitor_enter_critical(){
@@ -69,27 +71,18 @@ extern void thread_notify_send(Thread_t* thread);
 //==============================================
 
 void monitors_init(){
+    assert((s_arena = memman_get(VM_PERMA_ARENA_ID)));
     INIT_LIST_HEAD(&s_free_monitors);
 
-    if(!is_initialised){
-        #ifdef TARGET_LINUX
-        pthread_mutexattr_t attr = {0};
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(&s_monitor_lock, &attr);
-        #else
-        s_monitor_lock = xSemaphoreCreateRecursiveMutex();
-        assert(s_monitor_lock);
-        #endif
-        is_initialised = true;
-    }
-
-    for(unsigned i = 0; i < MAX_MONITORS; i++){
-        Monitor_t* monitor = &s_monitors[i];
-        monitor_init(monitor);
-
-        list_add(&monitor->list, &s_free_monitors);
-    }
+    #ifdef TARGET_LINUX
+    pthread_mutexattr_t attr = {0};
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s_monitor_lock, &attr);
+    #else
+    s_monitor_lock = xSemaphoreCreateRecursiveMutex();
+    assert(s_monitor_lock);
+    #endif
 }
 
 static Monitor_t* monitor_alloc(){
@@ -102,6 +95,15 @@ static Monitor_t* monitor_alloc(){
 
         monitor_exit_critical();
         return unused;
+    }
+
+    if(unused == NULL){
+        Monitor_t* new = bumper_calloc(s_arena, 1, sizeof(*unused));
+        if(new){
+            monitor_init(new);
+            monitor_exit_critical();
+            return new;
+        }
     }
 
     monitor_exit_critical();

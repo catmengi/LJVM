@@ -20,12 +20,14 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "heap.h"
 #include "bumper.h"
 #include "class.h"
+#include "classtable.h"
 #include "config.h"
 #include "interpreter.h"
 #include "jerror.h"
 #include "list.h"
 #include "thread.h"
 #include "monitor.h"
+#include "memman.h"
 
 #include <stdlib.h>
 #include <assert.h>
@@ -41,9 +43,8 @@ static SemaphoreHandle_t s_heap_lock = NULL;
 static pthread_mutex_t s_heap_lock = {0};
 #endif
 
-static atomic_bool s_gc_running = false;
 static struct list_head s_gc_thread_list;
-static bump_allocator_t s_gc_heap = {0};
+static bump_allocator_t* s_arena = NULL;
 static bool is_initialised = false;
 
 static int value_type_size[] = {
@@ -89,9 +90,9 @@ void heap_init(){
         assert(s_heap_lock);
         #endif
     
-        assert(bumper_create(&s_gc_heap, OBJECT_HEAP_SIZE) == 0);
+        assert((s_arena = memman_get(VM_GC_ARENA_ID)));
         is_initialised = true;
-    } else bumper_reset(&s_gc_heap);
+    } else bumper_reset(s_arena);
 }
 
 int heap_array_type_size(JavaValueType_t type){
@@ -106,14 +107,14 @@ Error_t heap_class_object_alloc(Class_t* class, Object_t** output){
     FAIL_SET_JUMP(class->flags.is_array == 0, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
 
-    if(sizeof(Object_t) + class->object_size > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))){
+    if(sizeof(Object_t) + class->object_size > (bumper_size(s_arena) - bumper_used(s_arena))){
         heap_exit_critical();
         heap_gc_start();
         heap_enter_critical();
     }
 
     Object_t* object = NULL;
-    FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + class->object_size)), err, JERR_OOM, exit);
+    FAIL_SET_JUMP((object = bumper_calloc(s_arena, 1, sizeof(*object) + class->object_size)), err, JERR_OOM, exit);
 
     INIT_LIST_HEAD(&object->list);
     object->class = class;
@@ -135,14 +136,14 @@ Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** outpu
     FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
     FAIL_SET_JUMP(length >= 0, err, JERR_BADPARAM, exit);
 
-    if(sizeof(Object_t) + sizeof(int32_t) + value_type_size[class->array_type] * length > (bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap))){
+    if(sizeof(Object_t) + sizeof(int32_t) + value_type_size[class->array_type] * length > (bumper_size(s_arena) - bumper_used(s_arena))){
         heap_exit_critical();
         heap_gc_start();
         heap_enter_critical();
     }
 
     Object_t* object = NULL;
-    FAIL_SET_JUMP((object = bumper_calloc(&s_gc_heap, 1, sizeof(*object) + sizeof(int32_t) + (value_type_size[class->array_type] * length))), err, JERR_OOM, exit);
+    FAIL_SET_JUMP((object = bumper_calloc(s_arena, 1, sizeof(*object) + sizeof(int32_t) + (value_type_size[class->array_type] * length))), err, JERR_OOM, exit);
 
     INIT_LIST_HEAD(&object->list);
     object->class = class;
@@ -158,32 +159,24 @@ exit:
 }
 
 Error_t heap_class_object_get_fields(Object_t* object, int32_t** output){
-    if(object->class->flags.is_array) return JERR_TYPECHECK_FAILURE;
+    if(!object) return JERR_NULLPOINTER;
 
     *output = (int32_t*)((char*)object + sizeof(*object));
     return JERR_OK;
 }
 
 Error_t heap_array_object_get_length(Object_t* object, int32_t* output){
-    Error_t err = JERR_OK;
-    FAIL_SET_JUMP(object && object->class->flags.is_array == 1, err, JERR_TYPECHECK_FAILURE, exit);
-    FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
+    if(!object) return JERR_NULLPOINTER;
 
     *output = *(int32_t*)(((char*)object) + sizeof(*object));
-
-exit:
-    return err;
+    return JERR_OK;
 }
 
 Error_t heap_array_object_get_elements(Object_t* object, void** output){
-    Error_t err = JERR_OK;
-    FAIL_SET_JUMP(object && object->class->flags.is_array == 1, err, JERR_TYPECHECK_FAILURE, exit);
-    FAIL_SET_JUMP(output, err, JERR_BADPARAM, exit);
-    
+    if(!object) return JERR_NULLPOINTER;
     *output = (((char*)object) + sizeof(*object) + sizeof(int32_t));
 
-exit:
-    return err;
+    return JERR_OK;
 }
 
 uint32_t heap_object_get_hashcode(Object_t* object){
@@ -238,69 +231,63 @@ static void gc_scan_threads(struct list_head* output_list){
     }
 }
 
-extern struct list_head* classes_get_all();
+extern struct list_head* classtable_entries_get();
 static void gc_scan_classes(struct list_head* output_list){
-    struct list_head* class_list = classes_get_all();
+    struct list_head* classtable_entries = classtable_entries_get();
+    ClasstableEntry_t* entry = NULL;
 
-    Class_t* class = NULL;
-    list_for_each_entry(class, class_list, list){
-        Object_t* object = class->class_object;
-        if(object && object->forward != GC_MARK_SENTINEL){
-            object->forward = GC_MARK_SENTINEL;
-            INIT_LIST_HEAD(&object->list);
-            list_add_tail(&object->list, output_list);
-        } 
-
-        int32_t* storage = class->storage;
-        for(unsigned i = 0; i < class->static_fields.count; i++){
-            Field_t* field = &class->static_fields.fields[i];
-            if(field->type == TYPE_REFERENCE){
-                Object_t* object = (Object_t*)storage[field->offset];
+    list_for_each_entry(entry, classtable_entries, list){
+        for(unsigned i = 0; i < CLASSTABLE_ENTRY_ITEMS_COUNT; i++){
+            Class_t* class = entry->items[i];
+            if(class){
+                Object_t* object = class->class_object;
                 if(object && object->forward != GC_MARK_SENTINEL){
                     object->forward = GC_MARK_SENTINEL;
                     INIT_LIST_HEAD(&object->list);
                     list_add_tail(&object->list, output_list);
+                }
+
+                int32_t* storage = class->storage;
+                for(unsigned i = 0; i < class->static_fields.count; i++){
+                    Field_t* field = &class->static_fields.fields[i];
+                    if(field->type == TYPE_REFERENCE){
+                        Object_t* object = (Object_t*)storage[field->offset];
+                        if(object && object->forward != GC_MARK_SENTINEL){
+                            object->forward = GC_MARK_SENTINEL;
+                            INIT_LIST_HEAD(&object->list);
+                            list_add_tail(&object->list, output_list);
+                        }                
+                    }
+                }                
+
+                for(unsigned i = 0; i < class->symtab.count; i++){
+                    ClassSymbol_t* sym = &class->symtab.symbols[i];
+                    if(sym->type == SYMBOL_STRING){
+                        Object_t* object = sym->value;
+                        if(object && object->forward != GC_MARK_SENTINEL){
+                            object->forward = GC_MARK_SENTINEL;
+                            INIT_LIST_HEAD(&object->list);
+                            list_add_tail(&object->list, output_list);                    
+                        }
+                    }
                 }                
             }
         }
-
-        for(unsigned i = 0; i < class->symtab.count; i++){
-            ClassSymbol_t* sym = &class->symtab.symbols[i];
-            if(sym->type == SYMBOL_STRING){
-                Object_t* object = sym->value;
-                if(object && object->forward != GC_MARK_SENTINEL){
-                    object->forward = GC_MARK_SENTINEL;
-                    INIT_LIST_HEAD(&object->list);
-                    list_add_tail(&object->list, output_list);                    
-                }
-            }
-        }
     }
 }
 
-#include "jstringpool.h"
-JavaStringPoolEntry_t* jstringpool_get_pool();
 
-static void gc_scan_jstringpool(struct list_head* output_list){
-    JavaStringPoolEntry_t* jstringpool = jstringpool_get_pool();
-    for(unsigned i = 0; i < JAVASTRINGPOOL_SIZE; i++){
-        JavaStringPoolEntry_t* entry = &jstringpool[i];
-
-        Object_t* object = entry->object;
-        if(object && object->forward != GC_MARK_SENTINEL){
-            object->forward = GC_MARK_SENTINEL;
-            INIT_LIST_HEAD(&object->list);
-            list_add_tail(&object->list, output_list);
-        }           
-    }
+/*
+static void gc_scan_stringpool(struct list_head* output_list){
 }
+*/
 
 static void gc_scan(){
     LIST_HEAD(root_list);
 
     gc_scan_classes(&root_list);
     gc_scan_threads(&root_list);
-    gc_scan_jstringpool(&root_list);
+    //gc_scan_stringpool(&root_list);
 
     Object_t *object = NULL, *tmp = NULL;
 
@@ -345,8 +332,7 @@ static void gc_scan(){
 }
 
 static void* gc_calculate_forwards(struct list_head* live_list){
-    bump_allocator_t calculation_arena = s_gc_heap; //hack to make it 100% match with actual bumper logic in future(in case alligment is added)
-    bump_allocator_t walk_arena = s_gc_heap;
+    bump_allocator_t calculation_arena = *s_arena; //hack to make it 100% match with actual bumper logic in future(in case alligment is added)
 
     void* heap_end = calculation_arena.last_end;
     void* heap_start = calculation_arena.memory;
@@ -413,37 +399,41 @@ static void gc_patch(struct list_head* live_list){
     //====================================
     
     //Class patching phase ============
-    struct list_head* class_list = classes_get_all();
+    struct list_head* classtable_entries = classtable_entries_get();
+    ClasstableEntry_t* entry = NULL;
 
-    Class_t* class = NULL;
-    list_for_each_entry(class, class_list, list){
-        Object_t* object = class->class_object;
-        if(object && object->forward != GC_MARK_SENTINEL){
-            class->class_object = object->forward;
-        } 
-
-    
-        int32_t* storage = class->storage;
-        for(unsigned i = 0; i < class->static_fields.count; i++){
-            Field_t* field = &class->static_fields.fields[i];
-            if(field->type == TYPE_REFERENCE){
-                Object_t* object = (Object_t*)storage[field->offset];
+    list_for_each_entry(entry, classtable_entries, list){
+        for(unsigned i = 0; i < CLASSTABLE_ENTRY_ITEMS_COUNT; i++){
+            Class_t* class = entry->items[i];
+            if(class){
+                Object_t* object = class->class_object;
                 if(object && object->forward != GC_MARK_SENTINEL){
-                    storage[field->offset] = (int32_t)object->forward;
-                }                
-            }
-        }
+                    class->class_object = object->forward;
+                }
 
-        for(unsigned i = 0; i < class->symtab.count; i++){
-            ClassSymbol_t* sym = &class->symtab.symbols[i];
-            if(sym->type == SYMBOL_STRING){
-                Object_t* object = sym->value;
-                if(object && object->forward != GC_MARK_SENTINEL){
-                    sym->value = object->forward;                
+                int32_t* storage = class->storage;
+                for(unsigned i = 0; i < class->static_fields.count; i++){
+                    Field_t* field = &class->static_fields.fields[i];
+                    if(field->type == TYPE_REFERENCE){
+                        Object_t* object = (Object_t*)storage[field->offset];
+                        if(object && object->forward != GC_MARK_SENTINEL){
+                            storage[field->offset] = (int32_t)object->forward;
+                        }                
+                    }
+                }
+
+                for(unsigned i = 0; i < class->symtab.count; i++){
+                    ClassSymbol_t* sym = &class->symtab.symbols[i];
+                    if(sym->type == SYMBOL_STRING){
+                        Object_t* object = sym->value;
+                        if(object && object->forward != GC_MARK_SENTINEL){
+                            sym->value = object->forward;                
+                        }
+                    }
                 }
             }
-        }        
-    }   
+        }
+    }
     //=============================
 
     //Object patching phase
@@ -480,7 +470,8 @@ static void gc_patch(struct list_head* live_list){
     }
     //=====================
 
-    //Patch jstringpool
+    //Patch stringpool
+    /*
     JavaStringPoolEntry_t* jstringpool = jstringpool_get_pool();
     for(unsigned i = 0; i < JAVASTRINGPOOL_SIZE; i++){
         JavaStringPoolEntry_t* entry = &jstringpool[i];
@@ -490,6 +481,7 @@ static void gc_patch(struct list_head* live_list){
             entry->object = object->forward;
         }           
     }
+    */
     //=====================
 }
 
@@ -506,19 +498,19 @@ static void gc_move(struct list_head* live_list){
         memmove(move_to, object, object_size);
     }
 
-    memset(s_gc_heap.last_end, 0, bumper_size(&s_gc_heap) - bumper_used(&s_gc_heap));
+    memset(s_arena->last_end, 0, bumper_size(s_arena) - bumper_used(s_arena));
 }
 
 extern void thread_notify_send(Thread_t* thread);
 void heap_gc_start(){
-    thread_safepoint_check();
+    //thread_safepoint_check();
     thread_safepoint_request();
     heap_enter_critical();
 
     gc_scan();
 
     LIST_HEAD(live_list);
-    s_gc_heap.last_end = gc_calculate_forwards(&live_list);
+    s_arena->last_end = gc_calculate_forwards(&live_list);
     gc_patch(&live_list);
     gc_move(&live_list);
 

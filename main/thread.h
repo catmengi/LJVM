@@ -77,6 +77,8 @@ typedef struct Thread_t{
     struct list_head gc_list; //required for GC scanning
     void* startup_args[THREAD_ARG_MAX]; //Startup arguments array (thread_start want so pass them somehow + init() can modify them)
 
+    Object_t* jlThread; //java.lang.Thread. Need for GC
+
     #ifdef TARGET_ESPIDF
     TaskHandle_t task;
     #else
@@ -96,10 +98,9 @@ typedef struct Thread_t{
 typedef struct Object_t Object_t;
 
 Thread_t* thread_self_get();
-Thread_t* thread_alloc();
+Thread_t* thread_alloc(Object_t* jlThread);
 
 void thread_start(Thread_t* thread, Method_t* method, int32_t* args);
-void thread_kill();
 void thread_sleep(uint32_t ms);
 
 uint64_t thread_time_ns_get();

@@ -6,7 +6,7 @@
 #include <assert.h>
 #include <string.h>
 
-static NativeMethodReturnValue_t arraycopy(Thread_t* thread, Method_t* self, int32_t* args){
+static NativeMethodReturnValue_t arraycopy(Interpreter_t* ctx, Method_t* self, int32_t* args){
     Object_t* src = (Object_t*)args[0];
     int32_t src_pos = args[1];
     Object_t* dst = (Object_t*)args[2];
@@ -19,9 +19,9 @@ static NativeMethodReturnValue_t arraycopy(Thread_t* thread, Method_t* self, int
         Class_t* exception_class = NULL;
         Object_t* exception = NULL;
 
-        assert(class_load_bynameid(stringpool_add("java/lang/ArrayStoreException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(ctx, stringpool_add("java/lang/ArrayStoreException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
-        assert(interpreter_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
+        assert(interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
 
         NativeMethodReturnValue_t retval = {0};
         retval.err = JERR_EXCEPTION;
@@ -39,9 +39,9 @@ static NativeMethodReturnValue_t arraycopy(Thread_t* thread, Method_t* self, int
         Class_t* exception_class = NULL;
         Object_t* exception = NULL;
 
-        assert(class_load_bynameid(stringpool_add("java/lang/IndexOutOfBoundsException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(ctx, stringpool_add("java/lang/IndexOutOfBoundsException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
-        assert(interpreter_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
+        assert(interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
 
         NativeMethodReturnValue_t retval = {0};
         retval.err = JERR_EXCEPTION;
@@ -65,7 +65,7 @@ static NativeMethodReturnValue_t arraycopy(Thread_t* thread, Method_t* self, int
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }
 
-static NativeMethodReturnValue_t currentTimeMillis(Thread_t* thread, Method_t* self, int32_t* args){
+static NativeMethodReturnValue_t currentTimeMillis(Interpreter_t* ctx, Method_t* self, int32_t* args){
     NativeMethodReturnValue_t retval = {0};
     retval.err = JERR_OK;
     *(int64_t*)retval.value = thread_time_ns_get() / 1000000;
@@ -73,12 +73,12 @@ static NativeMethodReturnValue_t currentTimeMillis(Thread_t* thread, Method_t* s
     return retval;
 }
 
-static NativeMethodReturnValue_t gc(Thread_t* thread, Method_t* self, int32_t* args){
+static NativeMethodReturnValue_t gc(Interpreter_t* ctx, Method_t* self, int32_t* args){
     heap_gc_start();
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }
 
-static NativeMethodReturnValue_t identityHashCode(Thread_t* thread, Method_t* self, int32_t* args){
+static NativeMethodReturnValue_t identityHashCode(Interpreter_t* ctx, Method_t* self, int32_t* args){
     NativeMethodReturnValue_t retval = {0};
     retval.err = JERR_OK;
     *(int32_t*)retval.value = ((Object_t*)args[0])->ident;
@@ -86,7 +86,7 @@ static NativeMethodReturnValue_t identityHashCode(Thread_t* thread, Method_t* se
     return retval;
 }
    
-static NativeMethodReturnValue_t vm_exit(Thread_t* thread, Method_t* self, int32_t* args){
+static NativeMethodReturnValue_t vm_exit(Interpreter_t* ctx,  Method_t* self, int32_t* args){
     //TODO: change it to proper exit
     exit(args[0]);
 }

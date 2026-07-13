@@ -1,9 +1,8 @@
 #include "../../../native_methods_service.h"
 #include "../../../heap.h"
 #include "../../../stringpool.h"
+#include "../../../interpreter.h"
 
-#include <errno.h>
-#include <stdlib.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -13,16 +12,19 @@
 #include <wchar.h>
 #include <sys/select.h>
 
-static NativeMethodReturnValue_t ns_open(Thread_t* thread, Method_t* method, int32_t* args){
+#define WRITE_CHUNK_SIZE 512
+static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, int32_t* args){
+    assert(0 && "Broken now (remade for new java.lang.String)");
+    
     Object_t* path = (Object_t*)args[0];
     //int32_t flags = args[1];
 
     if(path == NULL){
         Class_t* exception_class = NULL;
         Object_t* exception = NULL; 
-        assert(class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(ctx,stringpool_add("java/lang/NullPointerException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
-        assert(interpreter_method_invoke(class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL) == JERR_OK); 
+        assert(interpreter_method_invoke(ctx,class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL) == JERR_OK); 
 
         NativeMethodReturnValue_t retval = {0};
         retval.err = JERR_EXCEPTION;
@@ -64,7 +66,7 @@ static NativeMethodReturnValue_t ns_open(Thread_t* thread, Method_t* method, int
     return return_value;
 }
 
-static NativeMethodReturnValue_t ns_close(Thread_t* thread, Method_t* method, int32_t* args){
+static NativeMethodReturnValue_t ns_close(Interpreter_t* ctx, Method_t* method, int32_t* args){
     Object_t* self = (Object_t*)args[0];
     int32_t* storage = NULL;
     assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
@@ -77,24 +79,33 @@ static NativeMethodReturnValue_t ns_close(Thread_t* thread, Method_t* method, in
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }
 
-static NativeMethodReturnValue_t ns_write(Thread_t* thread, Method_t* method, int32_t* args){
-    Object_t* self = (Object_t*)args[0];
-    Object_t* buf = (Object_t*)args[1];
+static NativeMethodReturnValue_t ns_write(Interpreter_t* ctx, Method_t* method, int32_t* args){
+    NativeMethodReturnValue_t retval = {0};
 
-    static Field_t *fd_field = NULL;
-    if(!fd_field) assert((fd_field = class_find_instance_field(self->class, stringpool_add("fd@I"))));
+    int32_t fd = args[0];
+    int32_t remaining = 0;
+    int32_t written = 0;
+    FAIL_SET_JUMP((retval.err = heap_array_object_get_length((Object_t*)args[1], &remaining)) == JERR_OK, retval, retval, exit);
 
-    int32_t* storage = NULL;
-    assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
+    while(remaining > 0){
+        int write_len = remaining > WRITE_CHUNK_SIZE ? WRITE_CHUNK_SIZE : remaining;
 
-    uint8_t* bytes = NULL;
-    int32_t length = 0;
+        uint8_t* bytes = NULL;
+        FAIL_SET_JUMP((retval.err = heap_array_object_get_elements((Object_t*)args[1], (void**)&bytes)) == JERR_OK, retval, retval, exit);
 
-    assert(heap_array_object_get_elements(buf, (void**)&bytes) == JERR_OK);
-    assert(heap_array_object_get_length(buf, &length) == JERR_OK);
+        int32_t really_written = 0;
+        if((really_written = write(fd, bytes + written, write_len)) < 0){
+            assert(0 && "TODO: IOException throw");
+        }
 
-    assert(write(storage[fd_field->offset], bytes, length) == length);
-    return (NativeMethodReturnValue_t){JERR_OK, {0}};
+        remaining -= really_written;
+        written += really_written;
+
+        thread_safepoint_check();
+    }
+
+exit:
+    return retval;
 }
 
 NativeClass_t java_io_NativeOutputStream = {
@@ -104,6 +115,6 @@ NativeClass_t java_io_NativeOutputStream = {
         {"open@(Ljava/lang/String;I)I", ns_open},
         {"close@()V",ns_close},
         {"flush@()V",(void*)0x123},
-        {"write@([B)V", ns_write},
+        {"write_fd@(I[B)V", ns_write},
     },
 };

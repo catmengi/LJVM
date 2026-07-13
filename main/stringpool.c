@@ -21,42 +21,67 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "bumper.h"
 #include "config.h"
 #include "list.h"
+#include "memman.h"
 
+#include <stdatomic.h>
 #include <string.h>
-#include <assert.h>
 #include <stdbool.h>
+#include <assert.h>
 
-static bump_allocator_t s_arena = {0};
-static char** s_strings = NULL;
-static bool s_initialised = false;
 
-//========================== PREEMTIVE SUPPORT 
-#ifdef TARGET_ESPIDF
-#include "freertos/freeRTOS.h"
-#include "freertos/sem.h"
-static SemaphoreHandle_t s_stringpool_lock = NULL;
-#else
-#include <pthread.h>
-static pthread_mutex_t s_stringpool_lock = {0};
-#endif
+static bump_allocator_t* s_arena = NULL;
 
-static void stringpool_enter_critical(){
-    #ifdef TARGET_LINUX
-    pthread_mutex_lock(&s_stringpool_lock);
-    #else
-    xSemaphoreTakeRecursive(s_stringpool_lock, portMAX_DELAY);
-    #endif
+static struct list_head s_entry_list = {0};
+static atomic_flag s_entry_list_guard = ATOMIC_FLAG_INIT;
+static size_t s_entry_count = 0;
+
+#define POOL_CRITICAL_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
+#define POOL_CRITICAL_EXIT(spinlock) atomic_flag_clear(&(spinlock))
+
+static StringpoolEntry_t* insert_entry();
+void stringpool_init(){
+    assert((s_arena = memman_get(VM_PERMA_ARENA_ID)));
+
+    INIT_LIST_HEAD(&s_entry_list);
+    s_entry_list_guard = (atomic_flag)ATOMIC_FLAG_INIT;
+    s_entry_count = 0;
+
+    assert(insert_entry());  //Add initial entry (other wise it wouldnt work)
 }
 
-static void stringpool_exit_critical(){
-    #ifdef TARGET_LINUX
-    pthread_mutex_unlock(&s_stringpool_lock);
-    #else
-    xSemaphoreGiveRecursive(s_stringpool_lock);
-    #endif    
+//NON THREAD SAFE!
+static StringpoolEntry_t* insert_entry(){
+    StringpoolEntry_t* entry = bumper_calloc(s_arena, 1, sizeof(*entry));
+    if(!entry){
+        return NULL;
+    } 
+
+    INIT_LIST_HEAD(&entry->list);
+    //entry->spinlock = (atomic_flag)ATOMIC_FLAG_INIT;
+
+    list_add_tail(&entry->list, &s_entry_list);
+    s_entry_count++;
+
+    return entry;
 }
 
-//=================================================
+//It might return non-null entry but with NULL data since it performs NO validation. NON THREAD SAFE
+static StringpoolItem_t* find_slot(uint32_t name_id){
+    uint32_t bucket_index = name_id / STRINGPOOL_ENTRY_ITEMS_COUNT;
+    uint32_t slot_index = name_id % STRINGPOOL_ENTRY_ITEMS_COUNT;
+
+    if(bucket_index >= s_entry_count){
+        return NULL;
+    }
+
+    struct list_head* cur = s_entry_list.next;
+    for(unsigned i = 0; i < bucket_index; i++, cur = cur->next) {}
+
+    StringpoolEntry_t* entry = list_entry(cur, StringpoolEntry_t, list);
+
+    return &entry->items[slot_index];
+}
+
 
 static uint32_t djb2_hash(char *str) {
         uint32_t hash = 5381;
@@ -66,91 +91,98 @@ static uint32_t djb2_hash(char *str) {
         return hash;
 }
 
-void stringpool_init(){
-    if(!s_initialised){
-        #ifdef TARGET_LINUX
-        pthread_mutexattr_t attr = {0};
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(&s_stringpool_lock, &attr);
-        #else
-        s_stringpool_lock = xSemaphoreCreateRecursiveMutex();
-        assert(s_stringpool_lock);
-        #endif
+//THREAD SAFE
+int32_t stringpool_add(char* string){
+    if(!string) return -1;
 
-        assert(bumper_create(&s_arena, STRINGPOOL_ARENA) == 0);
-        assert((s_strings = bumper_calloc(&s_arena, STRINGPOOL_SIZE, sizeof(*s_strings))));
-        s_initialised = true;
-    } else {
-        memset(s_strings, 0, STRINGPOOL_SIZE * sizeof(*s_strings));
-        bumper_reset(&s_arena);   
-    }
-}
+    POOL_CRITICAL_ENTER(s_entry_list_guard);
 
-typedef struct{
-    uint32_t index;
-    struct{
-        union{
-            uint8_t all;
-            struct{
-                unsigned is_error:1;
-                unsigned is_found:1;
-            };
-        };
-    }flags;
-}SPoolCalculatedIndex_t;
+    uint32_t nameid_offset = 0, n = 0;
+    unsigned start_pos = djb2_hash(string) % STRINGPOOL_ENTRY_ITEMS_COUNT;
 
-static SPoolCalculatedIndex_t calculate_index(char* string){
-    uint32_t start_pos = djb2_hash(string) % STRINGPOOL_SIZE;
-    SPoolCalculatedIndex_t retval = {0};
+    StringpoolEntry_t* entry = NULL;
 
-    for(uint32_t i = 0; i < STRINGPOOL_SIZE; i++){
-        uint32_t current_idx = (start_pos + i) % STRINGPOOL_SIZE;
-        if(s_strings[current_idx] == NULL){
-            retval.index = current_idx;
-            retval.flags.is_found = 0;
-            retval.flags.is_error = 0;
-            goto exit;
-        } else if(strcmp(string, s_strings[current_idx]) == 0){
-            retval.index = current_idx;
-            retval.flags.is_found = 1;
-            retval.flags.is_error = 0;
-            goto exit;
+    list_for_each_entry(entry, &s_entry_list, list){
+
+insert:
+        for(unsigned i = 0; i < STRINGPOOL_ENTRY_ITEMS_COUNT; i++){
+            uint32_t index = (start_pos + i) % STRINGPOOL_ENTRY_ITEMS_COUNT;
+            StringpoolItem_t* item = &entry->items[index];
+
+            if(item->cstr == NULL){
+                item->cstr = bumper_strdup(s_arena, string);
+                if(!item->cstr){
+                    POOL_CRITICAL_EXIT(s_entry_list_guard);
+                    return -1;
+                }
+
+                POOL_CRITICAL_EXIT(s_entry_list_guard);
+                return index + nameid_offset;
+            } else if(strcmp(item->cstr, string) == 0){
+                POOL_CRITICAL_EXIT(s_entry_list_guard);
+                return index + nameid_offset;
+            }
+        }
+
+        nameid_offset += STRINGPOOL_ENTRY_ITEMS_COUNT;
+
+        if(++n == s_entry_count){ 
+            StringpoolEntry_t* new = insert_entry();
+            if(!new){
+                POOL_CRITICAL_EXIT(s_entry_list_guard);
+                return -1;
+            } else {
+                entry = new; //goto go brrrrrrrr
+                goto insert; //Should not fail
+            }
         }
     }
 
-    retval.flags.is_error = 1;
+    POOL_CRITICAL_EXIT(s_entry_list_guard);
+    return -1;
+}
+
+//THREAD SAFE
+char* stringpool_get(int32_t name_id){
+    POOL_CRITICAL_ENTER(s_entry_list_guard);
+
+    StringpoolItem_t* item = find_slot(name_id);
+
+    POOL_CRITICAL_EXIT(s_entry_list_guard);
+
+    return item ? item->cstr : NULL;
+}
+
+#include "class.h"
+#include "heap.h"
+#include "interpreter.h"
+
+Object_t* stringpool_get_java(Interpreter_t* ctx, int32_t name_id){
+    POOL_CRITICAL_ENTER(s_entry_list_guard);
+
+    StringpoolItem_t* item = find_slot(name_id);
+    assert(item && item->cstr);
+
+    Object_t* jstr = atomic_load(&item->jstr);
+    POOL_CRITICAL_EXIT(s_entry_list_guard);
+
+    if(!jstr){
+        Method_t* init = NULL;
+        Class_t* class = NULL;
+        FAIL_SET_JUMP(class_load_bynameid(ctx, stringpool_add("java/lang/String"), &class) == JERR_OK, jstr, NULL, exit);
+        FAIL_SET_JUMP(heap_class_object_alloc(class, &jstr) == JERR_OK, jstr, NULL, exit);
+
+        FAIL_SET_JUMP((init = class_find_method(class, stringpool_add("<init>@(I)V"))), jstr, NULL, exit); //TODO: java.lang.String support of name_id creating
+        FAIL_SET_JUMP(interpreter_method_invoke(ctx, init, (int32_t[2]){(uint32_t)jstr, name_id}, NULL) == JERR_OK, jstr, NULL, exit);
+
+        POOL_CRITICAL_ENTER(s_entry_list_guard);
+        if(!atomic_load(&item->jstr)){
+            atomic_store(&item->jstr, jstr);
+        } else jstr = atomic_load(&item->jstr);
+
+        POOL_CRITICAL_EXIT(s_entry_list_guard);
+    }
+    
 exit:
-    return retval;
+    return jstr;
 }
-
-int stringpool_add(char* string){
-    int value = -1;
-    if(!string) return -1;
-
-    stringpool_enter_critical();
-
-    SPoolCalculatedIndex_t index = calculate_index(string);
-    if(index.flags.is_found) {value = index.index; goto exit;}
-    if(index.flags.is_error) goto exit;
-
-    char* string_copy = bumper_strdup(&s_arena, string);
-    if(string_copy){
-        s_strings[index.index] = string_copy;
-        value = index.index;
-
-        goto exit;
-    };
-
-exit:
-    stringpool_exit_critical();
-    return value;
-}
-
-char* stringpool_get(int index){
-    if(index < 0 || index >= STRINGPOOL_SIZE)
-        return NULL;
-
-    return s_strings[index];
-}
-
