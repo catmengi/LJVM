@@ -19,11 +19,8 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
-#include "bumper.h"
-#include "config.h"
 #include "interpreter.h"
 #include "list.h"
-#include "jerror.h"
 #include "monitor.h"
 
 #include <stdbool.h>
@@ -89,9 +86,6 @@ typedef struct Thread_t{
 
     Interpreter_t interpreter;
     unsigned wake_recursion; //if 0 then thread is NOT in waiting state
-
-    void (*init)(); //Put here to make VM startup possible, since all API's now using current thread
-    //void (*exit)();
 }Thread_t;
 
 

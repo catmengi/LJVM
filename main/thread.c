@@ -28,7 +28,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include <assert.h>
 #include <pthread.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdatomic.h>
@@ -147,7 +146,6 @@ Thread_t* thread_alloc(Object_t* jlThread){
         pthread_cond_init(&new_thread->notify_condvar, NULL);
         #endif
 
-        new_thread->init = NULL; //TODO: set default method to startup interpreter
         new_thread->wake_recursion = 0;
     }
 
@@ -168,11 +166,9 @@ thread_task(void* params){
     Interpreter_t* interpreter = interpreter_ctx_init(thread, &thread->interpreter);
     heap_gc_thread_register(thread);
 
-    if(thread->init) thread->init();
-
     Method_t* method = ((void**)params)[1];
     int32_t* method_args = ((void**)params)[2];
-    
+
     InterpreterFrame_t* launch_frame = interpreter_frame_push(interpreter, method);
     assert(launch_frame);
 

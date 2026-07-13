@@ -18,8 +18,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "native_methods_service.h"
-#include "heap.h"
-#include "thread.h"
 
 #include <string.h>
 
