@@ -34,8 +34,12 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "classtable.h"
 
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+
+#define SPINLOCK_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
+#define SPINLOCK_EXIT(spinlock) atomic_flag_clear(&(spinlock))
 
 static bump_allocator_t *s_arena = NULL, *s_link_arena = NULL;
 
@@ -83,7 +87,8 @@ void classes_init(){
 }
 
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out);
-static Error_t class_link(Interpreter_t* ctx, Class_t* class);
+static Error_t class_link(Class_t* class);
+
 static JavaValueType_t array_class_type(char* name){
     if(strlen(name) > 1) return TYPE_REFERENCE;
     
@@ -97,7 +102,7 @@ static JavaValueType_t array_class_type(char* name){
     return TYPE_REFERENCE;
 }
 
-Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out){
+Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     assert(out);
     Error_t err = JERR_OK;
 
@@ -111,12 +116,12 @@ Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out)
         int jlname_id = stringpool_add("java/lang/Object");
         FAIL_SET_JUMP(jlname_id >= 0, err, JERR_OOM, exit);
 
-        FAIL_SET_JUMP((err = class_load_bynameid(ctx, jlname_id, &jlObject)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(jlname_id, &jlObject)) == JERR_OK, err, err, exit);
 
         Class_t* array_class = bumper_calloc(s_arena, 1, sizeof(*array_class));
         FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
 
-        INIT_LIST_HEAD(&array_class->hierarchy_list);
+        INIT_LIST_HEAD(&array_class->list);
         
         array_class->name_id = name_id;
 
@@ -129,7 +134,7 @@ Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out)
         array_class->object_size = jlObject->object_size;
 
         Class_t* jlClass = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &array_class->class_object)) == JERR_OK, err, err, exit);
 
         array_class->flags.is_linked = 1;
@@ -139,7 +144,7 @@ Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out)
         FAIL_SET_JUMP((err = classtable_put(array_class)) == JERR_OK, err, err, exit);
     } else {
         FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(string_name), out)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = class_link(ctx, *out)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_link(*out)) == JERR_OK, err, err, exit);
     }
 
 exit:
@@ -534,6 +539,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
     this_class->flags.is_final = (parsed_class->flags & ACC_FINAL) == ACC_FINAL;
     this_class->flags.is_abstract = (parsed_class->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
+    //this_class->spinlock = (atomic_flag)ATOMIC_FLAG_INIT;
+    this_class->clinit_stage = 0;
+    this_class->link_stage = 0;
 
     ClassLinkTimeMetadata_t* metadata = bumper_calloc(s_link_arena, 1, sizeof(*metadata));
     FAIL_SET_JUMP(metadata, err, JERR_OOM, exit);
@@ -555,7 +563,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     }
 
 
-    INIT_LIST_HEAD(&this_class->hierarchy_list);
+    INIT_LIST_HEAD(&this_class->list);
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
     this_class->implements.count = metadata->implements_count;
@@ -817,25 +825,25 @@ Error_t jstringpool_get(uint16_t name_id, Object_t** output);
 Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
     Error_t err = JERR_OK;
 
-    class_enter_critical();
+    SPINLOCK_ENTER(symbol->spinlock);
+    ClassProxySymbol_t* proxy_symbol = symbol->value;
     if(symbol->type < PROXY_SYMBOL_CLASS) goto exit;
 
-    ClassProxySymbol_t* proxy_symbol = symbol->value;
     
-    Class_t* origin = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(ctx, proxy_symbol->origin_name_id, &origin)) == JERR_OK,err,err,exit);
+    Class_t* location = NULL;
+    FAIL_SET_JUMP((err = class_load_bynameid(proxy_symbol->origin_name_id, &location)) == JERR_OK,err,err,exit);
 
     switch(symbol->type){
         case PROXY_SYMBOL_CLASS:{
             symbol->type = SYMBOL_CLASS;
-            symbol->value = origin;
+            symbol->value = location;
         }
         break;
 
         case PROXY_SYMBOL_FIELD:{
             symbol->type = SYMBOL_FIELD;
-            symbol->value = (symbol->value = class_find_static_field(origin, proxy_symbol->self_name_id)) ? 
-                            symbol->value : class_find_instance_field(origin, proxy_symbol->self_name_id);
+            symbol->value = (symbol->value = class_find_static_field(location, proxy_symbol->self_name_id)) ? 
+                            symbol->value : class_find_instance_field(location, proxy_symbol->self_name_id);
             FAIL_SET_JUMP(symbol->value, err, JERR_NOSUCHFIELD, exit);
 
             Field_t* field = symbol->value;
@@ -851,7 +859,7 @@ Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
 
         case PROXY_SYMBOL_METHOD:{
             symbol->type = SYMBOL_METHOD;
-            FAIL_SET_JUMP((symbol->value = class_find_method(origin, proxy_symbol->self_name_id)), err, JERR_NOSUCHMETHOD, exit);
+            FAIL_SET_JUMP((symbol->value = class_find_method(location, proxy_symbol->self_name_id)), err, JERR_NOSUCHMETHOD, exit);
 
             Method_t* method = symbol->value;
             if(!method->flags.is_public && thread_self_get()){
@@ -874,7 +882,7 @@ Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
     }
 
 exit:
-    class_exit_critical();
+    SPINLOCK_EXIT(symbol->spinlock);
     return err;
 }
 
@@ -886,7 +894,7 @@ static unsigned count_instance_methods(Class_t* class){
     return count;
 }
 
-static Error_t class_fix_hierarchy(Interpreter_t* ctx, Class_t* this_class){
+static Error_t class_fixup(Class_t* this_class){
     Error_t err = JERR_OK;
 
     Class_t* parent = this_class->parent;
@@ -935,7 +943,7 @@ static Error_t class_fix_hierarchy(Interpreter_t* ctx, Class_t* this_class){
     //Finally fix interfaces
     for(unsigned i = 0; i < this_class->implements.count; i++){
         Implementation_t* implementation = &this_class->implements.implementations[i];
-        FAIL_SET_JUMP((err = class_load_bynameid(ctx, metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
         Class_t* interface = implementation->interface;
 
         FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
@@ -954,16 +962,9 @@ static Error_t class_fix_hierarchy(Interpreter_t* ctx, Class_t* this_class){
         }
     }
 
-
-    Thread_t* thread = thread_self_get();
-    ctx = thread ? &thread->interpreter : ctx; //Decide should we use global fallback interpreter or thread's one (so it can catch init exception in theory)
-
-    Method_t* clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
-    FAIL_SET_JUMP(!clinit || (err = interpreter_method_invoke(ctx, clinit, NULL, NULL)) == JERR_OK, err, err, exit);
-
     Field_t* nativeClassPointer_field = NULL;
     Class_t* jlClass = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
@@ -977,7 +978,8 @@ exit:
     return err;
 }
 
-static Error_t class_link(Interpreter_t* ctx, Class_t* class){
+//TODO: refactor this! ===================
+static Error_t class_link(Class_t* class){
     static unsigned deepness = 0;
     Error_t err = JERR_OK;
     LIST_HEAD(hierarchy_list);
@@ -986,8 +988,8 @@ static Error_t class_link(Interpreter_t* ctx, Class_t* class){
 
     Class_t* cur_class = class;
     while(cur_class){
-        INIT_LIST_HEAD(&cur_class->hierarchy_list);
-        list_add(&cur_class->hierarchy_list, &hierarchy_list);
+        INIT_LIST_HEAD(&cur_class->list);
+        list_add(&cur_class->list, &hierarchy_list);
         if(cur_class->flags.is_linked) break;
 
         ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
@@ -999,9 +1001,9 @@ static Error_t class_link(Interpreter_t* ctx, Class_t* class){
     }
 
     Class_t* linking_class = NULL;
-    list_for_each_entry(linking_class, &hierarchy_list, hierarchy_list){
+    list_for_each_entry(linking_class, &hierarchy_list, list){
         if(!linking_class->flags.is_linked)
-            FAIL_SET_JUMP((err = class_fix_hierarchy(ctx, linking_class)) == JERR_OK, err, err, exit);
+            FAIL_SET_JUMP((err = class_fixup(linking_class)) == JERR_OK, err, err, exit);
     }
 
 exit:
@@ -1009,6 +1011,7 @@ exit:
         bumper_reset(s_link_arena);
     return err;
 }
+//========================================
 
 bool class_is_compatible(Class_t* class, Class_t* compatible_to){
     for(Class_t* cur = class; cur; cur = cur->parent){

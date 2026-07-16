@@ -169,7 +169,7 @@ Object_t* stringpool_get_java(Interpreter_t* ctx, int32_t name_id){
     if(!jstr){
         Method_t* init = NULL;
         Class_t* class = NULL;
-        FAIL_SET_JUMP(class_load_bynameid(ctx, stringpool_add("java/lang/String"), &class) == JERR_OK, jstr, NULL, exit);
+        FAIL_SET_JUMP(class_load_bynameid(stringpool_add("java/lang/String"), &class) == JERR_OK, jstr, NULL, exit);
         FAIL_SET_JUMP(heap_class_object_alloc(class, &jstr) == JERR_OK, jstr, NULL, exit);
 
         FAIL_SET_JUMP((init = class_find_method(class, stringpool_add("<init>@(I)V"))), jstr, NULL, exit); //TODO: java.lang.String support of name_id creating

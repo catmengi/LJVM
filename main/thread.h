@@ -88,12 +88,12 @@ typedef struct Thread_t{
     unsigned wake_recursion; //if 0 then thread is NOT in waiting state
 }Thread_t;
 
-
 typedef struct Object_t Object_t;
 
 Thread_t* thread_self_get();
 Thread_t* thread_alloc(Object_t* jlThread);
 
+void thread_start_exec(Thread_t* thread, Method_t* method, int32_t* args); //named because of analogy with UNIX exec()
 void thread_start(Thread_t* thread, Method_t* method, int32_t* args);
 void thread_sleep(uint32_t ms);
 

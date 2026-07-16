@@ -70,6 +70,7 @@ typedef struct{
 }ConstantPoolPatchSymbol_t;
 
 typedef struct{
+    atomic_flag spinlock; 
     SymbolType_t type;
     void* value;
 }ClassSymbol_t;
@@ -219,10 +220,12 @@ typedef struct{
 }ClassIMethodSymbol_t;
 
 typedef struct Class_t{
+    //atomic_flag spinlock;
+
     //Linker info
-    struct list_head hierarchy_list; //Required for link-time hierarchy building
-    struct list_head list;
     void* metadata;
+    struct list_head list; //Required for link-time hierarchy building
+    struct list_head clinit_list;
 
     //Class info
     uint16_t name_id;
@@ -231,20 +234,25 @@ typedef struct Class_t{
     ClassSymbolTable_t symtab;
     Object_t* class_object; //java.lang.Class instance
 
+    _Atomic(Thread_t*) clinit_trigger; //Thread that triggered clinit
+    atomic_int clinit_stage; //0 - not started, 1 - in progress, 2 - done
+    atomic_int link_stage; //TODO: refactor current linker and use it instead of a flag!
+                                //0 - not started, 1 - in progress, 2 - done
+
     struct{
         union{
             uint32_t flags;
             struct{
-                unsigned is_linked:1;
+                unsigned is_linked:1; //TODO: Refactor linker!
                 unsigned is_array:1;
                 unsigned is_interface:1;
                 unsigned is_final:1;
-                unsigned is_abstract:1; //set 1 if <clinit> was runned!
+                unsigned is_abstract:1;
                 //TODO: other flags
             };
         };
     }flags;
-    JavaValueType_t array_type; //Only usable if is_array == 1!, other wise TYPE_VOID
+    JavaValueType_t array_type; //Only usable if is_array == 1, other wise TYPE_VOID
 
     //Fields info
     //Separated to simplify GC scan logic.
@@ -269,7 +277,7 @@ typedef struct{
 void classes_init(); //Not to be called by user!
 
 Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol);
-Error_t class_load_bynameid(Interpreter_t* ctx, uint16_t name_id, Class_t** out);
+Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);

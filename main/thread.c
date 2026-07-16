@@ -33,6 +33,9 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <stdatomic.h>
 #include <time.h>
 
+#define SPINLOCK_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
+#define SPINLOCK_EXIT(spinlock) atomic_flag_clear(&(spinlock))
+
 static __thread Thread_t* s_current_thread = NULL;
 
 static LIST_HEAD(s_safepoint_threads);
@@ -112,9 +115,9 @@ request:
 
 inline void thread_safepoint_check(){
     if(atomic_load(&s_safepoint_requested) == true){
-        while(atomic_flag_test_and_set(&s_safepoint_threads_list_guard)) {}
+        SPINLOCK_ENTER(s_safepoint_threads_list_guard);
         list_add(&thread_self_get()->list, &s_safepoint_threads);
-        atomic_flag_clear(&s_safepoint_threads_list_guard);
+        SPINLOCK_EXIT(s_safepoint_threads_list_guard);
 
         while(atomic_load(&s_safepoint_requested) == true) thread_notify_wait();
     }
@@ -228,6 +231,21 @@ void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
     #else
     assert(xTaskCreate(thread_task, "java_thread", 4096, thread->startup_args, THREAD_DEFAULT_PRIORITY, &thread->task) == pdPASS);
     #endif
+}
+
+//Named from POSIX's exec() because it will run in context of our thread
+void thread_start_exec(Thread_t* thread, Method_t* method, int32_t* args){
+    thread->startup_args[0] = thread;
+    thread->startup_args[1] = method;
+    thread->startup_args[2] = args; 
+    
+    #ifdef TARGET_LINUX
+    thread->task = pthread_self();
+    #else
+    static_assert("TODO: freeRTOS");
+    #endif
+
+    thread_task(thread->startup_args);
 }
 
 _Noreturn void thread_exit(){

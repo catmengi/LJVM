@@ -19,7 +19,7 @@ static NativeMethodReturnValue_t arraycopy(Interpreter_t* ctx, Method_t* self, i
         Class_t* exception_class = NULL;
         Object_t* exception = NULL;
 
-        assert(class_load_bynameid(ctx, stringpool_add("java/lang/ArrayStoreException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(stringpool_add("java/lang/ArrayStoreException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
         assert(interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
 
@@ -39,7 +39,7 @@ static NativeMethodReturnValue_t arraycopy(Interpreter_t* ctx, Method_t* self, i
         Class_t* exception_class = NULL;
         Object_t* exception = NULL;
 
-        assert(class_load_bynameid(ctx, stringpool_add("java/lang/IndexOutOfBoundsException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(stringpool_add("java/lang/IndexOutOfBoundsException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
         assert(interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL) == JERR_OK);
 

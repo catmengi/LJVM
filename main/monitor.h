@@ -23,9 +23,13 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "list.h"
 #include "jerror.h"
 
+#include <stdatomic.h>
+
 typedef struct Thread_t Thread_t;
 typedef struct Object_t Object_t;
 typedef struct Monitor_t{
+    atomic_flag spinlock; 
+
     struct list_head list;
     struct list_head enter_set; //list of threads that awaiting the objects unlocking
     struct list_head wait_set; //Object.wait()

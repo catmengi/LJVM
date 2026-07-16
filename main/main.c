@@ -35,20 +35,13 @@ int app_main(){
     loader_set_systempath("java_src");
 
     Class_t* main_class = NULL;
-    Interpreter_t* ctx = interpreter_ctx_init(NULL, &(Interpreter_t){0}); //Create bootstrap ctx
-    assert(class_load_bynameid(ctx, stringpool_add("JEspressoTest"), &main_class) == JERR_OK);
+    assert(class_load_bynameid(stringpool_add("JEspressoTest"), &main_class) == JERR_OK);
 
     Method_t* main = class_find_method(main_class, stringpool_add("debug@()V"));
     assert(main);
 
-    for(unsigned i = 0; i < 16; i++){
-        Thread_t* thread = thread_alloc(NULL);
-        thread_start(thread, main, NULL);
-    }
+    thread_start_exec(thread_alloc(NULL), main, NULL);
 
-    //assert(thread_schedule() == JERR_OK);
-
-    pthread_exit(NULL);
     return 0;
 }
 

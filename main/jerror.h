@@ -27,6 +27,7 @@ typedef enum{
     JERR_ORPHAN_RETURN,
     JERR_TYPECHECK_FAILURE,
     JERR_UNHANDLED_EXCEPTION,
+    JERR_CLINIT_FAILED,
 
     //Exception-generating errors:
     JERR_NOCLASSDEF,

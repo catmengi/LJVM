@@ -20,10 +20,9 @@ public class JEspressoTest {
 
     public static void debug() throws IOException{
 
+        ns.flush();
         String s = "Проверка UTF8, everything is in check!\n";
 
-        while(true){
             System.out.print(s);
-        }
     }
 }

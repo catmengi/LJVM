@@ -1,5 +1,6 @@
 #include "interpreter.h"
 #include "jerror.h"
+#include "list.h"
 #include "monitor.h"
 #include "opcodes.h"
 #include "native_methods_service.h"
@@ -10,6 +11,7 @@
 #include "stringpool.h"
 #include "lb_endian.h"
 
+#include <stdatomic.h>
 #include <string.h>
 #include <assert.h>
 #include <math.h>
@@ -469,7 +471,7 @@ static void frame_unlock_monitors(InterpreterFrame_t* frame){
     }
 }
 
-Error_t throw_exception(Interpreter_t* ctx, Object_t* exception_object){
+static Error_t throw_exception(Interpreter_t* ctx, Object_t* exception_object){
     size_t unwind_by = 0;
     //TODO: prepare stack trace!
 
@@ -500,6 +502,51 @@ Error_t throw_exception(Interpreter_t* ctx, Object_t* exception_object){
     }
 
     return JERR_UNHANDLED_EXCEPTION;
+}
+
+#define SPINLOCK_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
+#define SPINLOCK_EXIT(spinlock) atomic_flag_clear(&(spinlock))
+
+static Error_t run_clinit(Interpreter_t* ctx, Class_t* class){
+    Error_t err = JERR_OK;
+
+    LIST_HEAD(clinit_list);
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        int expected = 0;
+        if(atomic_compare_exchange_strong(&cur->clinit_stage, &expected, 1)){
+            atomic_store(&cur->clinit_trigger, ctx->thread);
+
+            INIT_LIST_HEAD(&cur->clinit_list);
+            list_add(&cur->clinit_list, &clinit_list);
+        } else {
+            while(atomic_load(&cur->clinit_stage) != 2){
+                if(atomic_load(&cur->clinit_trigger) == ctx->thread){
+                    goto clinit_launch;
+                }
+                usleep(1000); //To not busy spin CPU
+            }
+
+            goto clinit_launch;
+        }
+    }
+
+clinit_launch:
+    if(!list_empty(&clinit_list)){
+        int32_t clinit_nameid = stringpool_add("<clinit>@()V");
+        assert(clinit_nameid >= 0);
+
+        Class_t* to_init = NULL;
+        list_for_each_entry(to_init, &clinit_list, clinit_list){
+            Method_t* clinit = class_find_method(to_init, clinit_nameid);
+            if(clinit){
+                FAIL_SET_JUMP((err = interpreter_method_invoke(ctx, clinit, NULL, NULL)) == JERR_OK, err, JERR_CLINIT_FAILED, exit);
+            }
+            atomic_store(&to_init->clinit_stage, 2);
+        }
+    }
+
+exit:
+    return err;
 }
 
 Error_t interpreter_execute(Interpreter_t* ctx){
@@ -1063,8 +1110,11 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
+
         Field_t* field = sym->value;
         FAIL_SET_JUMP(field->flags.is_static, err, JERR_INCOMPATIBLECLASSCHANGE, exit);
+        FAIL_SET_JUMP((err = run_clinit(ctx, field->class)) == JERR_OK, err, err, exit);
+
 
         field->constantvalue = NULL;
         
@@ -1079,6 +1129,8 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         Field_t* field = sym->value;
         FAIL_SET_JUMP(field->flags.is_static, err, JERR_INCOMPATIBLECLASSCHANGE, exit);
+        FAIL_SET_JUMP((err = run_clinit(ctx, field->class)) == JERR_OK, err, err, exit);
+
 
         void* value = &field->class->storage[field->offset];
 
@@ -1179,8 +1231,8 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = sym->value;
-
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
+        FAIL_SET_JUMP((err = run_clinit(ctx, method->class)) == JERR_OK, err, err, exit);
 
         if (!method->flags.is_native){
             InterpreterFrame_t* new_frame = interpreter_frame_push(ctx, method);
@@ -1485,8 +1537,10 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
+
         Class_t* class = sym->value;
-        
+        FAIL_SET_JUMP((err = run_clinit(ctx, class)) == JERR_OK, err, err, exit);
+
         FAIL_SET_JUMP(!class->flags.is_abstract, err, JERR_INSTANTIATION, exit);
 
         Object_t* object = 0;
@@ -1516,7 +1570,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         Object_t* array = NULL;
         Class_t* array_class = NULL;
         char class_name[3] = {'[',type_mapping[type],'\0'};
-        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add(class_name), &array_class)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(class_name), &array_class)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, err, exit);
 
         STACK_PUSH_REF(frame, array);
@@ -1550,7 +1604,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         Class_t* array_class = NULL;
         Object_t* array = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(ctx, stringpool_add(array_class_name), &array_class)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add(array_class_name), &array_class)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP((err = heap_array_object_alloc(array_class, length, &array)) == JERR_OK, err, err, exit);
 
         STACK_PUSH_REF(frame, array);
@@ -2374,7 +2428,7 @@ exit:
         Object_t* exception = err == JERR_EXCEPTION ? STACK_POP_REF(frame) : NULL;
         if(!exception){
             Class_t* exception_class = NULL;
-            FAIL_SET_JUMP((err = class_load_bynameid(ctx, error_to_exception_nameid(err), &exception_class)) == JERR_OK, err, err, exit); //Oh, this is cursed
+            FAIL_SET_JUMP((err = class_load_bynameid(error_to_exception_nameid(err), &exception_class)) == JERR_OK, err, err, exit); //Oh, this is cursed
             FAIL_SET_JUMP((err = heap_class_object_alloc(exception_class, &exception)) == JERR_OK, err, err, exit);
             FAIL_SET_JUMP((err = interpreter_method_invoke(ctx, class_find_method(exception_class, stringpool_add("<init>@()V")), NULL, NULL)) == JERR_OK, err, err, exit);            
         }

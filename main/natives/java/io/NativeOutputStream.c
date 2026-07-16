@@ -22,7 +22,7 @@ static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, i
     if(path == NULL){
         Class_t* exception_class = NULL;
         Object_t* exception = NULL; 
-        assert(class_load_bynameid(ctx,stringpool_add("java/lang/NullPointerException"), &exception_class) == JERR_OK);
+        assert(class_load_bynameid(stringpool_add("java/lang/NullPointerException"), &exception_class) == JERR_OK);
         assert(heap_class_object_alloc(exception_class, &exception) == JERR_OK);
         assert(interpreter_method_invoke(ctx,class_find_method(exception_class, stringpool_add("<init>@()V")), (int32_t[1]){(int32_t)exception}, NULL) == JERR_OK); 
 
@@ -79,6 +79,19 @@ static NativeMethodReturnValue_t ns_close(Interpreter_t* ctx, Method_t* method, 
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }
 
+static NativeMethodReturnValue_t ns_flush(Interpreter_t* ctx, Method_t* method, int32_t* args){
+    Object_t* self = (Object_t*)args[0];
+    int32_t* storage = NULL;
+    assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
+
+    Field_t *fd = NULL;
+    assert((fd = class_find_instance_field(self->class, stringpool_add("fd@I"))));
+
+    fsync(storage[fd->offset]);
+
+    return (NativeMethodReturnValue_t){JERR_OK, {0}};
+}
+
 static NativeMethodReturnValue_t ns_write(Interpreter_t* ctx, Method_t* method, int32_t* args){
     NativeMethodReturnValue_t retval = {0};
 
@@ -114,7 +127,7 @@ NativeClass_t java_io_NativeOutputStream = {
     .methods = (NativeMethodDescriptor_t[]){
         {"open@(Ljava/lang/String;I)I", ns_open},
         {"close@()V",ns_close},
-        {"flush@()V",(void*)0x123},
+        {"flush@()V",ns_flush},
         {"write_fd@(I[B)V", ns_write},
     },
 };
