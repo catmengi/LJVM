@@ -19,7 +19,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include "config.h"
 #include "interpreter.h"
-#include "monitor.h"
 #include "stringpool.h"
 #include "class.h"
 #include "thread.h"
@@ -42,6 +41,7 @@ int app_main(){
 
     thread_start_exec(thread_alloc(NULL), main, NULL);
 
+    pthread_exit(NULL);
     return 0;
 }
 

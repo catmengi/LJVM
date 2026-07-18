@@ -32,7 +32,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
-#include <stdatomic.h>
 
 #ifdef TARGET_ESPIDF
 #include "freertos/freeRTOS.h"
@@ -158,10 +157,10 @@ exit:
     return err;
 }
 
-Error_t heap_class_object_get_fields(Object_t* object, int32_t** output){
+Error_t heap_class_object_get_fields(Object_t* object, void** output){
     if(!object) return JERR_NULLPOINTER;
 
-    *output = (int32_t*)((char*)object + sizeof(*object));
+    *output = ((char*)object + sizeof(*object));
     return JERR_OK;
 }
 
@@ -247,11 +246,11 @@ static void gc_scan_classes(struct list_head* output_list){
                     list_add_tail(&object->list, output_list);
                 }
 
-                int32_t* storage = class->storage;
+                void* sfields_storage = class->sfields_storage;
                 for(unsigned i = 0; i < class->static_fields.count; i++){
                     Field_t* field = &class->static_fields.fields[i];
                     if(field->type == TYPE_REFERENCE){
-                        Object_t* object = (Object_t*)storage[field->offset];
+                        Object_t* object = *(Object_t**)(sfields_storage + field->offset);
                         if(object && object->forward != GC_MARK_SENTINEL){
                             object->forward = GC_MARK_SENTINEL;
                             INIT_LIST_HEAD(&object->list);
@@ -411,13 +410,13 @@ static void gc_patch(struct list_head* live_list){
                     class->class_object = object->forward;
                 }
 
-                int32_t* storage = class->storage;
+                void* sfields_storage = class->sfields_storage;
                 for(unsigned i = 0; i < class->static_fields.count; i++){
                     Field_t* field = &class->static_fields.fields[i];
                     if(field->type == TYPE_REFERENCE){
-                        Object_t* object = (Object_t*)storage[field->offset];
+                        Object_t* object = *(Object_t**)(sfields_storage + field->offset);
                         if(object && object->forward != GC_MARK_SENTINEL){
-                            storage[field->offset] = (int32_t)object->forward;
+                            *(Object_t**)(sfields_storage + field->offset) = object->forward;
                         }                
                     }
                 }

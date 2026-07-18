@@ -638,6 +638,12 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         [EJOPCODE_LCONST_0]   = &&EJOPCODE_LCONST_0,
         [EJOPCODE_LCONST_1]   = &&EJOPCODE_LCONST_1,
 
+        [EJOPCODE_FCONST_0] = &&EJOPCODE_FCONST_0,
+        [EJOPCODE_FCONST_1] = &&EJOPCODE_FCONST_1,
+        [EJOPCODE_FCONST_2] = &&EJOPCODE_FCONST_2,
+        [EJOPCODE_DCONST_0] = &&EJOPCODE_DCONST_0,
+        [EJOPCODE_DCONST_1] = &&EJOPCODE_DCONST_1,
+
         [EJOPCODE_PUTSTATIC]  = &&EJOPCODE_PUTSTATIC,
         [EJOPCODE_GETSTATIC]  = &&EJOPCODE_GETSTATIC,
         [EJOPCODE_PUTFIELD] = &&EJOPCODE_PUTFIELD,
@@ -688,6 +694,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         [EJOPCODE_IINC]       = &&EJOPCODE_IINC,
         [EJOPCODE_GOTO]       = &&EJOPCODE_GOTO,
+        [EJOPCODE_GOTO_W] = &&EJOPCODE_GOTO_W,
         [EJOPCODE_JSR]        = &&EJOPCODE_JSR,
         [EJOPCODE_JSR_W]      = &&EJOPCODE_JSR_W,
         [EJOPCODE_RET]        = &&EJOPCODE_RET,
@@ -1007,6 +1014,23 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         STACK_PUSH_LONG(frame, 1);
         NEXT();
 
+    EJOPCODE_FCONST_0:
+        STACK_PUSH_FLOAT(frame, 0);
+        NEXT();
+    EJOPCODE_FCONST_1:
+        STACK_PUSH_FLOAT(frame, 1);
+        NEXT();
+    EJOPCODE_FCONST_2:
+        STACK_PUSH_FLOAT(frame, 2);
+        NEXT();       
+
+    EJOPCODE_DCONST_0:
+        STACK_PUSH_DOUBLE(frame, 0);
+        NEXT();
+    EJOPCODE_DCONST_1:
+        STACK_PUSH_DOUBLE(frame, 1);
+        NEXT();
+
     EJOPCODE_BIPUSH:
         STACK_PUSH_INT(frame, (int32_t)*(int8_t*)(frame->pc + 1));
         NEXT();
@@ -1103,7 +1127,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         NEXT();
     }
 
-    //TODO: move access right checks somewhere else to make it one time (preferably on symbol resolution)
     // ========== FIELD ACCESS ==========
     EJOPCODE_PUTSTATIC: {
         ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
@@ -1112,13 +1135,40 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
 
         Field_t* field = sym->value;
+        void* value = (field->class->sfields_storage + field->offset);
+
         FAIL_SET_JUMP(field->flags.is_static, err, JERR_INCOMPATIBLECLASSCHANGE, exit);
         FAIL_SET_JUMP((err = run_clinit(ctx, field->class)) == JERR_OK, err, err, exit);
 
 
         field->constantvalue = NULL;
         
-        STACK_POP_GENERIC(frame, field->type, &field->class->storage[field->offset]);
+        if(field->flags.is_volatile){
+            char volatile_buf[8] = {0};
+            STACK_POP_GENERIC(frame, field->type, volatile_buf);
+
+            switch(field->size){
+                case 1:
+                    __atomic_store_n((uint8_t*)value, *(uint8_t*)volatile_buf, __ATOMIC_SEQ_CST);
+                    break;
+    
+                case 2:
+                    __atomic_store_n((uint16_t*)value, *(uint16_t*)volatile_buf, __ATOMIC_SEQ_CST);
+                    break;
+
+                case 4:
+                    __atomic_store_n((uint32_t*)value, *(uint32_t*)volatile_buf, __ATOMIC_SEQ_CST);
+                    break;
+            
+                case 8:
+                    __atomic_store_n((uint64_t*)value, *(uint64_t*)volatile_buf, __ATOMIC_SEQ_CST);
+                    break;
+            }
+
+            NEXT();
+        }
+
+        STACK_POP_GENERIC(frame, field->type, value);
         NEXT();
     }
 
@@ -1132,13 +1182,34 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP((err = run_clinit(ctx, field->class)) == JERR_OK, err, err, exit);
 
 
-        void* value = &field->class->storage[field->offset];
+        void* value = (field->class->sfields_storage + field->offset);
 
         if (field->constantvalue) {
             FAIL_SET_JUMP((err = class_resolv_symbol(ctx, field->constantvalue)) == JERR_OK, err, err, exit);
             memcpy(value, (field->constantvalue->type == SYMBOL_STRING) ? &field->constantvalue->value : field->constantvalue->value,
                    ((field->type == TYPE_LONG || field->type == TYPE_DOUBLE) ? 2 : 1) * sizeof(int32_t));
             field->constantvalue = NULL;
+        }
+
+        if(field->flags.is_volatile){
+            char volatile_buf[8] = {0};
+            switch(field->size){
+                case 1:
+                    *(uint8_t*)volatile_buf = __atomic_load_n((uint8_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 2:
+                    *(uint16_t*)volatile_buf = __atomic_load_n((uint16_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 4:
+                    *(uint32_t*)volatile_buf = __atomic_load_n((uint32_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 8:
+                    *(uint64_t*)volatile_buf = __atomic_load_n((uint64_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+            }
+
+            STACK_PUSH_GENERIC(frame, field->type, volatile_buf);
+            NEXT();
         }
 
         STACK_PUSH_GENERIC(frame, field->type, value);
@@ -1158,12 +1229,34 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
 
-        int32_t* fields = NULL;
+        void* fields = NULL;
         FAIL_SET_JUMP((err = heap_class_object_get_fields(object, &fields)) == JERR_OK, err, err, exit);
 
-        assert(frame->sp < ((MethodBytecode_t*)frame->method->code)->max_stack);
-        STACK_PUSH_GENERIC(frame, field->type, &fields[field->offset]);
+        void* value = fields + field->offset;
 
+        if(field->flags.is_volatile){
+            char volatile_buf[8] = {0};
+            switch(field->size){
+                case 1:
+                    *(uint8_t*)volatile_buf = __atomic_load_n((uint8_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 2:
+                    *(uint16_t*)volatile_buf = __atomic_load_n((uint16_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 4:
+                    *(uint32_t*)volatile_buf = __atomic_load_n((uint32_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+                case 8:
+                    *(uint64_t*)volatile_buf = __atomic_load_n((uint64_t*)value, __ATOMIC_ACQUIRE);
+                    break;
+            }
+
+            STACK_PUSH_GENERIC(frame, field->type, volatile_buf);
+            NEXT();
+        }
+
+
+        STACK_PUSH_GENERIC(frame, field->type, (fields + field->offset));
         NEXT();
     }
 
@@ -1175,18 +1268,42 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         Field_t* field = sym->value;
         FAIL_SET_JUMP(!field->flags.is_static, err, JERR_INCOMPATIBLECLASSCHANGE, exit);
 
-        int64_t value = 0;
+        uint64_t value_buf;
+        STACK_POP_GENERIC(frame, field->type, &value_buf);
 
-        STACK_POP_GENERIC(frame, field->type, &value);
         Object_t* object = STACK_POP_REF(frame);
         FAIL_SET_JUMP(object, err, JERR_NULLPOINTER, exit);
 
         FAIL_SET_JUMP(class_is_compatible(object->class, field->class), err, JERR_TYPECHECK_FAILURE, exit);
 
-        int32_t* fields = NULL;
+        void* fields = NULL;
         FAIL_SET_JUMP((err = heap_class_object_get_fields(object, &fields)) == JERR_OK, err, err, exit);
-        memcpy(&fields[field->offset], &value, field->size);
 
+        void* value = (fields + field->offset);
+
+        if(field->flags.is_volatile){
+            switch(field->size){
+                case 1:
+                    __atomic_store_n((uint8_t*)value, *(uint8_t*)&value_buf, __ATOMIC_SEQ_CST);
+                    break;
+    
+                case 2:
+                    __atomic_store_n((uint16_t*)value, *(uint16_t*)&value_buf, __ATOMIC_SEQ_CST);
+                    break;
+
+                case 4:
+                    __atomic_store_n((uint32_t*)value, *(uint32_t*)&value_buf, __ATOMIC_SEQ_CST);
+                    break;
+            
+                case 8:
+                    __atomic_store_n((uint64_t*)value, *(uint64_t*)&value_buf, __ATOMIC_SEQ_CST);
+                    break;
+            }
+
+            NEXT();
+        }
+
+        memcpy(value, &value_buf, field->size);
         NEXT();
     }
 
@@ -1436,6 +1553,13 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         thread_safepoint_check();
 
         frame->pc += (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        goto *opcode_labels[*frame->pc];
+    }
+
+    EJOPCODE_GOTO_W:{
+        thread_safepoint_check();
+
+        frame->pc += (int32_t)be32_to_cpu(*(int32_t*)(frame->pc + 1));
         goto *opcode_labels[*frame->pc];
     }
 

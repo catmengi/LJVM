@@ -88,7 +88,7 @@ typedef struct{
 typedef struct Field_t{
     uint16_t name_id;
     JavaValueType_t type; //Still store type separately for faster opcodes on resolved fields
-    size_t offset; //offset is in uint32_t words!
+    size_t offset; //offset in bytes
     size_t size; //size in bytes
     
     Class_t* class;
@@ -101,6 +101,7 @@ typedef struct Field_t{
                 unsigned is_public:1;
                 unsigned is_protected:1;
                 unsigned is_private:1;
+                unsigned is_volatile:1;
             };
         };
     }flags;     
@@ -260,7 +261,7 @@ typedef struct Class_t{
     FieldTable_t static_fields;
 
     size_t object_size; //Size of class data in BYTES (for easier allocation logic)
-    int32_t* storage; //Static fields storage
+    void* sfields_storage; //Static fields storage
 
     //Method info
     //TODO: methods structure

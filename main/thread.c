@@ -182,11 +182,11 @@ thread_task(void* params){
     }
 
     Field_t* VMThread_field = NULL;
-    int32_t* jlThread_storage = NULL;
+    void* jlThread_storage = NULL;
     if(thread->jlThread){
         if((VMThread_field = class_find_instance_field(thread->jlThread->class, stringpool_add("VMThread@J")))){
             if(heap_class_object_get_fields(thread->jlThread, &jlThread_storage) == JERR_OK){
-                memset(&jlThread_storage[VMThread_field->offset], 0, VMThread_field->size);
+                memset((jlThread_storage + VMThread_field->offset), 0, VMThread_field->size);
             }
         }
     }
@@ -226,6 +226,8 @@ void thread_start(Thread_t* thread, Method_t* method, int32_t* args){
     thread->startup_args[1] = method;
     thread->startup_args[2] = args;
 
+    thread->is_exec = false;
+
     #ifdef TARGET_LINUX
     assert(pthread_create(&thread->task, NULL, thread_task, thread->startup_args) == 0);
     #else
@@ -239,6 +241,8 @@ void thread_start_exec(Thread_t* thread, Method_t* method, int32_t* args){
     thread->startup_args[1] = method;
     thread->startup_args[2] = args; 
     
+    thread->is_exec = true;
+
     #ifdef TARGET_LINUX
     thread->task = pthread_self();
     #else
@@ -248,7 +252,7 @@ void thread_start_exec(Thread_t* thread, Method_t* method, int32_t* args){
     thread_task(thread->startup_args);
 }
 
-_Noreturn void thread_exit(){
+void thread_exit(){
     atomic_fetch_sub_explicit(&s_active_threads, 1, memory_order_seq_cst);
 
     Thread_t* thread = thread_self_get();
@@ -258,15 +262,18 @@ _Noreturn void thread_exit(){
         thread_notify_send(wakeup);
     }
 
+    bool is_exec = thread->is_exec;
     heap_gc_thread_unregister(thread);
     free(thread);
 
-    #ifdef TARGET_LINUX
-    pthread_detach(pthread_self());
-    pthread_exit(NULL);
-    #else
-    vTaskDelete(NULL);
-    #endif
+    if(!is_exec){
+        #ifdef TARGET_LINUX
+        pthread_detach(pthread_self());
+        pthread_exit(NULL);
+        #else
+        vTaskDelete(NULL);
+        #endif
+    } 
 }
 
 

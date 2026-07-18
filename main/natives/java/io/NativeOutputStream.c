@@ -33,7 +33,7 @@ static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, i
         return retval;            
     }
 
-    int32_t* storage = NULL;
+    void* storage = NULL;
     assert(heap_class_object_get_fields(path, &storage) == JERR_OK);
     
     Field_t *value = NULL, *count = NULL, *offset = NULL;
@@ -41,13 +41,13 @@ static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, i
     assert((count = class_find_instance_field(path->class, stringpool_add("count@I"))));
     assert((offset = class_find_instance_field(path->class, stringpool_add("offset@I"))));
 
-    Object_t* char_array = (Object_t*)storage[value->offset];
+    Object_t* char_array = *(Object_t**)(storage + value->offset);
 
     int16_t* chars = NULL;
     assert(heap_array_object_get_elements(char_array, (void**)&chars) == JERR_OK);
 
-    int32_t real_length = storage[count->offset] - storage[offset->offset];
-    int16_t* start = chars + storage[offset->offset];
+    int32_t real_length = *(int32_t*)(storage + count->offset) - *(int32_t*)(storage + offset->offset);
+    int16_t* start = chars + *(int32_t*)(storage + offset->offset);
 
     char path_str[real_length + 1];
     //wcstombs(path_str, (wchar_t*)start, real_length > sizeof(path_str) ? real_length : sizeof(path_str));
@@ -68,26 +68,26 @@ static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, i
 
 static NativeMethodReturnValue_t ns_close(Interpreter_t* ctx, Method_t* method, int32_t* args){
     Object_t* self = (Object_t*)args[0];
-    int32_t* storage = NULL;
+    void* storage = NULL;
     assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
 
     Field_t *fd = NULL;
     assert((fd = class_find_instance_field(self->class, stringpool_add("fd@I"))));
 
-    close(storage[fd->offset]);
+    close(*(int32_t*)(storage + fd->offset));
 
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }
 
 static NativeMethodReturnValue_t ns_flush(Interpreter_t* ctx, Method_t* method, int32_t* args){
     Object_t* self = (Object_t*)args[0];
-    int32_t* storage = NULL;
+    void* storage = NULL;
     assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
 
     Field_t *fd = NULL;
     assert((fd = class_find_instance_field(self->class, stringpool_add("fd@I"))));
 
-    fsync(storage[fd->offset]);
+    fsync(*(int32_t*)(storage + fd->offset));
 
     return (NativeMethodReturnValue_t){JERR_OK, {0}};
 }

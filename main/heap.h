@@ -51,7 +51,7 @@ void heap_gc_start();
 uint32_t heap_object_get_hashcode(Object_t* object);
 
 Error_t heap_class_object_alloc(Class_t* class, Object_t** output);
-Error_t heap_class_object_get_fields(Object_t* object, int32_t** output);
+Error_t heap_class_object_get_fields(Object_t* object, void** output);
 
 int heap_array_type_size(JavaValueType_t type);
 Error_t heap_array_object_alloc(Class_t* class, int32_t length, Object_t** output);

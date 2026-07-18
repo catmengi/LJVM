@@ -612,11 +612,13 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
         field->class = this_class;
         field->type = raw_field_descriptor_utf8->string[0] == '[' ? TYPE_REFERENCE : raw_field_descriptor_utf8->string[0];
-        field->offset = offsets[is_static];
-        field->flags.is_static = is_static;
         field->size = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
-        offsets[is_static] += field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? 2 : 1;
 
+        field->offset = offsets[is_static];
+        offsets[is_static] += field->size;
+
+        field->flags.is_static = is_static;
+        field->flags.is_volatile = (raw_field->flags & ACC_VOLATILE) == ACC_VOLATILE;
         field->flags.is_public = (raw_field->flags & ACC_PUBLIC) == ACC_PUBLIC;
         field->flags.is_private = (raw_field->flags & ACC_PRIVATE) == ACC_PRIVATE;
         field->flags.is_protected = (raw_field->flags & ACC_PROTECTED) == ACC_PROTECTED;
@@ -638,8 +640,8 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
             }
         }
     }
-    this_class->storage = bumper_calloc(s_arena, offsets[1], sizeof(int32_t));
-    FAIL_SET_JUMP(this_class->storage, err, JERR_OOM, exit);
+    this_class->sfields_storage = bumper_calloc(s_arena, 1, offsets[1]);
+    FAIL_SET_JUMP(this_class->sfields_storage, err, JERR_OOM, exit);
 
     this_class->object_size = offsets[0] * sizeof(int32_t); //Will will use this also on linker stage to calculate proper offsets
 
@@ -968,9 +970,9 @@ static Error_t class_fixup(Class_t* this_class){
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
-    int32_t* fields = NULL;
+    void* fields = NULL;
     FAIL_SET_JUMP((err = heap_class_object_get_fields(this_class->class_object, &fields)) == JERR_OK, err, err, exit);
-    fields[nativeClassPointer_field->offset] = (int32_t)this_class;
+    *(Class_t**)(fields + nativeClassPointer_field->offset) = jlClass;
 
     this_class->metadata = NULL;
     this_class->flags.is_linked = 1;

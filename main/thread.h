@@ -75,6 +75,7 @@ typedef struct Thread_t{
     void* startup_args[THREAD_ARG_MAX]; //Startup arguments array (thread_start want so pass them somehow + init() can modify them)
 
     Object_t* jlThread; //java.lang.Thread. Need for GC
+    bool is_exec; //if true, thread_exit() must NOT detach and pthread kill the thread
 
     #ifdef TARGET_ESPIDF
     TaskHandle_t task;
