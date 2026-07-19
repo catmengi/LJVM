@@ -225,8 +225,7 @@ typedef struct Class_t{
 
     //Linker info
     void* metadata;
-    struct list_head list; //Required for link-time hierarchy building
-    struct list_head clinit_list;
+    struct list_head list[2]; //Required for link-time hierarchy building
 
     //Class info
     uint16_t name_id;

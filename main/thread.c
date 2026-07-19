@@ -135,7 +135,7 @@ inline void thread_safepoint_release(){
 
 
 Thread_t* thread_alloc(Object_t* jlThread){
-    Thread_t* new_thread = calloc(1, sizeof(*new_thread));
+    Thread_t* new_thread = calloc(1, sizeof(*new_thread)); //heap_caps_calloc(1, sizeof(*new_thread), MALLOC_CAP_SPIRAM)) something like this
 
     if(new_thread){
         INIT_LIST_HEAD(&new_thread->joiners);
@@ -186,7 +186,7 @@ thread_task(void* params){
     if(thread->jlThread){
         if((VMThread_field = class_find_instance_field(thread->jlThread->class, stringpool_add("VMThread@J")))){
             if(heap_class_object_get_fields(thread->jlThread, &jlThread_storage) == JERR_OK){
-                memset((jlThread_storage + VMThread_field->offset), 0, VMThread_field->size);
+                __atomic_store_n((int64_t*)(jlThread_storage + VMThread_field->offset), 0, __ATOMIC_SEQ_CST);
             }
         }
     }
@@ -253,14 +253,14 @@ void thread_start_exec(Thread_t* thread, Method_t* method, int32_t* args){
 }
 
 void thread_exit(){
-    atomic_fetch_sub_explicit(&s_active_threads, 1, memory_order_seq_cst);
-
     Thread_t* thread = thread_self_get();
     Thread_t* wakeup = NULL, *tmp = NULL;
     list_for_each_entry_safe(wakeup, tmp, &thread->joiners, list){
         list_del_init(&wakeup->list);
         thread_notify_send(wakeup);
     }
+
+    atomic_fetch_sub_explicit(&s_active_threads, 1, memory_order_seq_cst);
 
     bool is_exec = thread->is_exec;
     heap_gc_thread_unregister(thread);
@@ -283,6 +283,7 @@ void thread_join(Thread_t* join_to){
     list_del_init(&thread->list);
     list_add(&thread->list, &join_to->joiners);
 
+    thread_safepoint_check();
     thread_notify_wait();
     thread_safepoint_check();
 }

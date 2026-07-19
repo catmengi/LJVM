@@ -516,8 +516,8 @@ static Error_t run_clinit(Interpreter_t* ctx, Class_t* class){
         if(atomic_compare_exchange_strong(&cur->clinit_stage, &expected, 1)){
             atomic_store(&cur->clinit_trigger, ctx->thread);
 
-            INIT_LIST_HEAD(&cur->clinit_list);
-            list_add(&cur->clinit_list, &clinit_list);
+            INIT_LIST_HEAD(&cur->list[1]);
+            list_add(&cur->list[1], &clinit_list);
         } else {
             while(atomic_load(&cur->clinit_stage) != 2){
                 if(atomic_load(&cur->clinit_trigger) == ctx->thread){
@@ -536,7 +536,7 @@ clinit_launch:
         assert(clinit_nameid >= 0);
 
         Class_t* to_init = NULL;
-        list_for_each_entry(to_init, &clinit_list, clinit_list){
+        list_for_each_entry(to_init, &clinit_list, list[1]){
             Method_t* clinit = class_find_method(to_init, clinit_nameid);
             if(clinit){
                 FAIL_SET_JUMP((err = interpreter_method_invoke(ctx, clinit, NULL, NULL)) == JERR_OK, err, JERR_CLINIT_FAILED, exit);
@@ -1415,6 +1415,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         }
     }
 
+    //TODO: super interface scanning shit
     EJOPCODE_INVOKEINTERFACE:{
         thread_safepoint_check();
 

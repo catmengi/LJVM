@@ -1,7 +1,7 @@
 import java.io.IOException;
 import java.io.NativeOutputStream;
 
-public class JEspressoTest {
+public class JEspressoTest{
     static NativeOutputStream ns = new NativeOutputStream(1);
 
     static{

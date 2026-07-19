@@ -121,7 +121,7 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         Class_t* array_class = bumper_calloc(s_arena, 1, sizeof(*array_class));
         FAIL_SET_JUMP(array_class, err, JERR_OOM, exit);
 
-        INIT_LIST_HEAD(&array_class->list);
+        INIT_LIST_HEAD(&array_class->list[0]);
         
         array_class->name_id = name_id;
 
@@ -563,7 +563,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     }
 
 
-    INIT_LIST_HEAD(&this_class->list);
+    INIT_LIST_HEAD(&this_class->list[0]);
+    INIT_LIST_HEAD(&this_class->list[1]);
+
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
     this_class->implements.count = metadata->implements_count;
@@ -772,7 +774,6 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         }
     }
 
-    FAIL_SET_JUMP(classtable_put(this_class) == 0, err, JERR_OOM, exit);
     *out = this_class;
 
 exit:
@@ -898,11 +899,10 @@ static unsigned count_instance_methods(Class_t* class){
 
 static Error_t class_fixup(Class_t* this_class){
     Error_t err = JERR_OK;
+    static Class_t* jlClass = NULL;
 
     Class_t* parent = this_class->parent;
-    ClassLinkTimeMetadata_t* metadata = this_class->metadata;
-
-    FAIL_SET_JUMP(!parent || !parent->flags.is_final, err, JERR_TYPECHECK_FAILURE, exit);
+    FAIL_SET_JUMP((parent && !parent->flags.is_final) || !parent, err, JERR_TYPECHECK_FAILURE, exit);
 
     //Fix field offsets
     this_class->object_size += parent ? parent->object_size : 0;
@@ -945,7 +945,6 @@ static Error_t class_fixup(Class_t* this_class){
     //Finally fix interfaces
     for(unsigned i = 0; i < this_class->implements.count; i++){
         Implementation_t* implementation = &this_class->implements.implementations[i];
-        FAIL_SET_JUMP((err = class_load_bynameid(metadata->implements[i], &implementation->interface)) == JERR_OK, err, err, exit);
         Class_t* interface = implementation->interface;
 
         FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
@@ -957,63 +956,114 @@ static Error_t class_fixup(Class_t* this_class){
         for(unsigned j = 0; j < interface->methods.count; j++){
             Method_t* imethod = &interface->methods.methods[j];
             if(imethod->flags.is_virtual){
-                FAIL_SET_JUMP((implementation->methods[iindex] = class_find_vtable_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
+                FAIL_SET_JUMP((implementation->methods[iindex] = class_find_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
                 imethod->interface_index = iindex;
                 iindex++;
             }
         }
     }
 
+    this_class->metadata = NULL; //Its linked, but we still need to create java/lang/Class (it fucks up if i move this to function end)
+    this_class->flags.is_linked = 1;
+    FAIL_SET_JUMP((err = classtable_put(this_class)) == JERR_OK, err, err, exit);
+
     Field_t* nativeClassPointer_field = NULL;
-    Class_t* jlClass = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
+    if(!jlClass){
+        FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class("java/lang/Class"),&jlClass)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((jlClass->parent = classtable_get(stringpool_add("java/lang/Object"))), err, JERR_NOCLASSDEF, exit);
+        FAIL_SET_JUMP((err = class_fixup(jlClass)) == JERR_OK, err, err, exit);
+    }
+
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
     FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
     void* fields = NULL;
     FAIL_SET_JUMP((err = heap_class_object_get_fields(this_class->class_object, &fields)) == JERR_OK, err, err, exit);
     *(Class_t**)(fields + nativeClassPointer_field->offset) = jlClass;
-
-    this_class->metadata = NULL;
-    this_class->flags.is_linked = 1;
 exit:
     return err;
 }
+static Class_t* class_linktime_lookup(int32_t nameid, struct list_head* list){
+    Class_t* class = NULL;
+    list_for_each_entry(class, list, list[1]){
+        if(class->name_id == nameid) return class;
+    }
 
-//TODO: refactor this! ===================
+    return NULL;
+}
+
+//java.lang.Object cannot implement any interfaces with this linker!
 static Error_t class_link(Class_t* class){
-    static unsigned deepness = 0;
     Error_t err = JERR_OK;
-    LIST_HEAD(hierarchy_list);
+    class_enter_critical();
 
-    deepness++;
+    LIST_HEAD(discovery_list); //List of classes that need to be discovered for loading
+    LIST_HEAD(required_list); //List of all classes that class_link loaded
+    LIST_HEAD(ancestry_list); //grandparent -> parent -> child list. Does NOT include interfaces
 
-    Class_t* cur_class = class;
-    while(cur_class){
-        INIT_LIST_HEAD(&cur_class->list);
-        list_add(&cur_class->list, &hierarchy_list);
-        if(cur_class->flags.is_linked) break;
+    INIT_LIST_HEAD(&class->list[0]);
+    list_add(&class->list[0], &discovery_list);
 
-        ClassLinkTimeMetadata_t* metadata = cur_class->metadata;
-        if(!metadata->is_root && !(cur_class->parent = classtable_get(metadata->parent_name_id))){
-            //Using raw API to make it work properly
-            FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(stringpool_get(metadata->parent_name_id)), &cur_class->parent)) == JERR_OK, err, err, exit);
-            cur_class = cur_class->parent;
-        } else break;
+    while(!list_empty(&discovery_list)){
+        Class_t *to_discover = NULL, *tmp = NULL;
+        list_for_each_entry_safe(to_discover, tmp, &discovery_list, list[0]){
+            list_del_init(&to_discover->list[0]); //remove from discovery list
+            list_del_init(&to_discover->list[1]); //for sure
+
+            list_add(&to_discover->list[1], &required_list); //Add to lookup
+
+            ClassLinkTimeMetadata_t* metadata = to_discover->metadata;
+            assert(metadata); //Like, WHAT THE FUCK
+
+            if(!metadata->is_root){
+                Class_t* parent = NULL;
+                if(!(parent = class_linktime_lookup(metadata->parent_name_id, &required_list))){
+                    if(!(parent = classtable_get(metadata->parent_name_id))){
+                        FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(
+                                    stringpool_get(metadata->parent_name_id)), &parent)) == JERR_OK,err, err, exit);
+
+                        INIT_LIST_HEAD(&parent->list[0]);
+                        list_add_tail(&parent->list[0], &discovery_list); //It need to be processed
+
+                    }
+                }
+                to_discover->parent = parent; //Add it as parent
+
+            } else to_discover->parent = NULL; //java.lang.Object
+
+            for(unsigned i = 0; i < metadata->implements_count; i++){
+                Implementation_t* impl = &to_discover->implements.implementations[i];
+
+                if(!(impl->interface = class_linktime_lookup(metadata->implements[i], &required_list))){
+                    if(!(impl->interface = classtable_get(metadata->implements[i]))){
+                        FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(
+                                        stringpool_get(metadata->implements[i])), &impl->interface)) == JERR_OK,err, err, exit);
+
+                        INIT_LIST_HEAD(&impl->interface->list[0]);
+                        list_add_tail(&impl->interface->list[0], &discovery_list);
+                    }
+                }
+            }
+        }
     }
 
-    Class_t* linking_class = NULL;
-    list_for_each_entry(linking_class, &hierarchy_list, list){
-        if(!linking_class->flags.is_linked)
-            FAIL_SET_JUMP((err = class_fixup(linking_class)) == JERR_OK, err, err, exit);
+    for(Class_t* cur = class; cur; cur = cur->parent){
+        if(!cur->flags.is_linked){
+            INIT_LIST_HEAD(&cur->list[0]);
+            list_add(&cur->list[0], &ancestry_list);
+        }
     }
 
+    Class_t *to_link = NULL, *tmp = NULL;
+    list_for_each_entry_safe(to_link, tmp, &ancestry_list, list[0]){
+        FAIL_SET_JUMP((err = class_fixup(to_link)) == JERR_OK, err, err, exit);
+    }
+
+    bumper_reset(s_link_arena);
 exit:
-    if(--deepness == 0)
-        bumper_reset(s_link_arena);
+    class_exit_critical();
     return err;
 }
-//========================================
 
 bool class_is_compatible(Class_t* class, Class_t* compatible_to){
     for(Class_t* cur = class; cur; cur = cur->parent){
