@@ -1,7 +1,18 @@
 import java.io.IOException;
 import java.io.NativeOutputStream;
 
-public class JEspressoTest{
+interface debug_b{
+    int debug_bb();
+}
+
+interface debug extends debug_b{
+    int debug_a();
+}
+
+public class JEspressoTest implements debug{
+    public int debug_a(){return 0;}
+    public int debug_bb(){return 1;}
+    
     static NativeOutputStream ns = new NativeOutputStream(1);
 
     static{

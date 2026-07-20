@@ -568,9 +568,6 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
-    this_class->implements.count = metadata->implements_count;
-    this_class->implements.implementations = bumper_calloc(s_arena, this_class->implements.count, sizeof(*this_class->implements.implementations));
-    FAIL_SET_JUMP(this_class->implements.implementations, err, JERR_OOM, exit);
 
     //Constantpool / symtab init
     INIT_LIST_HEAD(&metadata->cp_patch_list);
@@ -958,7 +955,7 @@ static Error_t class_fixup(Class_t* this_class){
             if(imethod->flags.is_virtual){
                 FAIL_SET_JUMP((implementation->methods[iindex] = class_find_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
                 imethod->interface_index = iindex;
-                iindex++;
+                iindex++; //This should really be same every time
             }
         }
     }
@@ -992,6 +989,15 @@ static Class_t* class_linktime_lookup(int32_t nameid, struct list_head* list){
     return NULL;
 }
 
+static Class_t* class_linktime_lookup0(int32_t nameid, struct list_head* list){
+    Class_t* class = NULL;
+    list_for_each_entry(class, list, list[0]){
+        if(class->name_id == nameid) return class;
+    }
+
+    return NULL;
+}
+
 //java.lang.Object cannot implement any interfaces with this linker!
 static Error_t class_link(Class_t* class){
     Error_t err = JERR_OK;
@@ -1000,6 +1006,7 @@ static Error_t class_link(Class_t* class){
     LIST_HEAD(discovery_list); //List of classes that need to be discovered for loading
     LIST_HEAD(required_list); //List of all classes that class_link loaded
     LIST_HEAD(ancestry_list); //grandparent -> parent -> child list. Does NOT include interfaces
+    LIST_HEAD(iface_list);
 
     INIT_LIST_HEAD(&class->list[0]);
     list_add(&class->list[0], &discovery_list);
@@ -1009,6 +1016,9 @@ static Error_t class_link(Class_t* class){
         list_for_each_entry_safe(to_discover, tmp, &discovery_list, list[0]){
             list_del_init(&to_discover->list[0]); //remove from discovery list
             list_del_init(&to_discover->list[1]); //for sure
+
+            if(to_discover->flags.is_interface)
+                list_add(&to_discover->list[0], &iface_list);
 
             list_add(&to_discover->list[1], &required_list); //Add to lookup
 
@@ -1032,15 +1042,17 @@ static Error_t class_link(Class_t* class){
             } else to_discover->parent = NULL; //java.lang.Object
 
             for(unsigned i = 0; i < metadata->implements_count; i++){
-                Implementation_t* impl = &to_discover->implements.implementations[i];
+                Class_t* iface = NULL;
 
-                if(!(impl->interface = class_linktime_lookup(metadata->implements[i], &required_list))){
-                    if(!(impl->interface = classtable_get(metadata->implements[i]))){
+                if(!(iface = class_linktime_lookup(metadata->implements[i], &required_list))){
+                    if(!(iface = classtable_get(metadata->implements[i]))){
                         FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class(
-                                        stringpool_get(metadata->implements[i])), &impl->interface)) == JERR_OK,err, err, exit);
+                                        stringpool_get(metadata->implements[i])), &iface)) == JERR_OK,err, err, exit);
 
-                        INIT_LIST_HEAD(&impl->interface->list[0]);
-                        list_add_tail(&impl->interface->list[0], &discovery_list);
+                        if(!class_linktime_lookup(iface->name_id, &required_list)){
+                            INIT_LIST_HEAD(&iface->list[0]);
+                            list_add_tail(&iface->list[0], &discovery_list);
+                        }
                     }
                 }
             }
@@ -1054,8 +1066,76 @@ static Error_t class_link(Class_t* class){
         }
     }
 
+    Class_t* iface_patch = NULL; //Set implements for interfaces. Need for interface flattening in future
+    list_for_each_entry(iface_patch, &iface_list, list[0]){
+        if(!iface_patch->flags.is_linked){
+            iface_patch->flags.is_linked = 1;
+
+            ClassLinkTimeMetadata_t* metadata = iface_patch->metadata;
+            iface_patch->implements.count = metadata->implements_count;
+            iface_patch->implements.implementations = bumper_calloc(s_arena, iface_patch->implements.count, sizeof(*iface_patch->implements.implementations));
+
+            FAIL_SET_JUMP(iface_patch->implements.implementations, err, JERR_OOM, exit);
+
+            for(unsigned i = 0; i < iface_patch->implements.count; i++){
+                Implementation_t* impl = &iface_patch->implements.implementations[i];
+
+                if(!(impl->interface = classtable_get(metadata->implements[i]))){
+                    FAIL_SET_JUMP((impl->interface = class_linktime_lookup(metadata->implements[i], &required_list)), err, JERR_NOCLASSDEF, exit);
+                }
+            }
+
+
+            classtable_put(iface_patch); //If someone dares to touch this class and not get locked up, we are fucked
+        }
+    }
+
     Class_t *to_link = NULL, *tmp = NULL;
     list_for_each_entry_safe(to_link, tmp, &ancestry_list, list[0]){
+        LIST_HEAD(iface_discovery); //Also perform interface flattening. (simpler itable build)
+        LIST_HEAD(iface_required);
+
+        ClassLinkTimeMetadata_t* metadata = to_link->metadata; //Add root interfaces
+        for(unsigned i = 0; i < metadata->implements_count; i++){
+            Class_t* interface = classtable_get(metadata->implements[i]);
+            if(!interface){ //If not in main class table, search in this current link session
+                assert((interface = class_linktime_lookup(metadata->implements[i], &required_list)));
+            }
+
+            list_del_init(&interface->list[0]);
+            list_add(&interface->list[0], &iface_discovery);
+        }
+
+        unsigned iface_count = 0;
+        while(!list_empty(&iface_discovery)){
+            Class_t *to_discover = NULL, *tmp = NULL;
+            list_for_each_entry_safe(to_discover, tmp, &iface_discovery, list[0]){
+                iface_count++;
+
+                list_del_init(&to_discover->list[0]);
+                list_add_tail(&to_discover->list[0], &iface_required);
+            
+                for(unsigned i = 0; i < to_discover->implements.count; i++){
+                    Class_t* iface = to_discover->implements.implementations[i].interface;
+
+                    if(!class_linktime_lookup0(iface->name_id, &iface_required)){
+                        list_del_init(&iface->list[0]);
+                        list_add_tail(&iface->list[0], &iface_discovery);
+                    }
+                }
+            }
+        }
+
+        to_link->implements.count = iface_count;
+        to_link->implements.implementations = bumper_calloc(s_arena, to_link->implements.count, sizeof(*to_link->implements.implementations));
+        FAIL_SET_JUMP(to_link->implements.implementations, err, JERR_OOM, exit);
+
+        int iindex = 0;
+        Class_t* iface = NULL;
+        list_for_each_entry(iface, &iface_required, list[0]){
+            to_link->implements.implementations[iindex++].interface = iface;
+        }
+
         FAIL_SET_JUMP((err = class_fixup(to_link)) == JERR_OK, err, err, exit);
     }
 
