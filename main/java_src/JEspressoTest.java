@@ -9,14 +9,35 @@ interface debug extends debug_b{
     int debug_a();
 }
 
-public class JEspressoTest implements debug{
-    public int debug_a(){return 0;}
-    public int debug_bb(){return 1;}
-    
-    static NativeOutputStream ns = new NativeOutputStream(1);
+class implementation implements debug{
+    public int debug_a(){
+        System.out.print("debug_a WORKS!\n");
+        return 0;
+    }
+
+    public int debug_bb(){
+        System.out.print("debug_bb WORKS TOO\n");
+        return 0;
+    }
+}
+
+class implextend extends implementation{
+    public int debug_a(){
+        System.out.print("debug_a extended WORKS!\n");
+        return 0;
+    }
+
+    public int debug_bb(){
+        System.out.print("debug_bb extended WORKS TOO\n");
+        return 0;
+    }    
+}
+
+public class JEspressoTest{
+    //static NativeOutputStream ns = new NativeOutputStream(1);
 
     static{
-        NativeOutputStream ns = new NativeOutputStream(1);
+        /*NativeOutputStream ns = new NativeOutputStream(1);
         byte b[] = new byte[10];
         for(int i = 0; i < b.length; i++){
             b[i] = 10;
@@ -27,13 +48,32 @@ public class JEspressoTest implements debug{
         } catch (Throwable t){
             System.exit(1);
         }
+        */
     };
 
     public static void debug() throws IOException{
 
-        ns.flush();
         String s = "Проверка UTF8, everything is in check!\n";
 
-            System.out.print(s);
+        debug debug = new implementation();
+        debug.debug_a();
+
+        debug_b debug_b = debug; 
+        debug_b.debug_bb();
+
+
+        debug ext = new implextend();
+        debug_b ext_b = ext;
+
+        ext.debug_a();
+        ext_b.debug_bb();
+
+        System.out.print(s);
+    }
+
+    public static void main(String args[]){
+        try{
+            debug();
+        } catch (Exception e){}
     }
 }

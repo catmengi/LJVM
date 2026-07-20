@@ -207,7 +207,7 @@ typedef struct{
     Class_t* interface;
 
     size_t methods_count;
-    Method_t** methods;
+    int32_t* vtable_index; //Need for extension override
 }Implementation_t;
 
 typedef struct{
@@ -269,10 +269,6 @@ typedef struct Class_t{
     size_t vtable_size;
     Method_t** vtable;
 }Class_t;
-
-typedef struct{
-    Class_t* classes[1024];
-}ClassTable_t;
 
 void classes_init(); //Not to be called by user!
 

@@ -1316,7 +1316,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = sym->value;
-
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
         if (!method->flags.is_native) {
@@ -1325,7 +1324,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
             FAIL_SET_JUMP(check_arguments(method, frame->shadow_stack, frame->sp - method->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
             if(method->flags.is_syncronized){
-                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1357,7 +1355,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
             FAIL_SET_JUMP(check_arguments(method, frame->shadow_stack, frame->sp - method->args_slots), err, JERR_TYPECHECK_FAILURE, exit);
             if(method->flags.is_syncronized){
-                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1389,10 +1386,8 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         Class_t* object_class = object->class;
         FAIL_SET_JUMP(template->flags.is_virtual, err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
-        FAIL_SET_JUMP(template->vtable_index < object_class->vtable_size, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = object_class->vtable[template->vtable_index];
-
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
         if (!method->flags.is_native) {
@@ -1400,7 +1395,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
             FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             if(method->flags.is_syncronized){
-                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
             
@@ -1415,7 +1409,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         }
     }
 
-    //TODO: super interface scanning shit
     EJOPCODE_INVOKEINTERFACE:{
         thread_safepoint_check();
 
@@ -1434,13 +1427,19 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = NULL;
-        for(unsigned i = 0; i < object_class->implements.count; i++){
-            Implementation_t* implementation = &object_class->implements.implementations[i];
-            if(implementation->interface->name_id == template->class->name_id){
-                FAIL_SET_JUMP(implementation->methods_count > template->interface_index, err, JERR_TYPECHECK_FAILURE, exit);
-                method = implementation->methods[template->interface_index];
+        if(!template->flags.is_static){
+            for(Class_t* cur = object_class; cur; cur = cur->parent){
+                for(unsigned i = 0; i < cur->implements.count; i++){
+                    Implementation_t* implementation = &cur->implements.implementations[i];
+                    if(implementation->interface == template->class){
+                        method = object_class->vtable[implementation->vtable_index[template->interface_index]]; //Using upmost class here
+                        goto found;
+                    }
+                }
             }
-        }
+        } else method = template;
+
+        found:
         FAIL_SET_JUMP(method, err, JERR_NOSUCHMETHOD, exit);
         FAIL_SET_JUMP(!method->flags.is_abstract, err, JERR_ABSTRACT, exit);
 
@@ -1450,7 +1449,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
             FAIL_SET_JUMP(new_frame, err, JERR_STACKOVERFLOW, exit);
 
             if(method->flags.is_syncronized){
-                assert(ctx->thread && "Cannot be run from bootstrap context");
                 FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - method->args_slots])) == JERR_OK, err, err, exit);
             }
 
@@ -1587,11 +1585,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_DUP: {
-        // DUP duplicates the top word on the stack (int, float, or reference)
-        if (frame->sp == 0) {
-            err = JERR_TYPECHECK_FAILURE;
-            goto exit;
-        }
         int top_idx = frame->sp - 1;
         int32_t value = frame->stack[top_idx];
         int is_ref = SHADOW_GET_REF(frame->shadow_stack, top_idx);
@@ -1599,7 +1592,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         if (is_ref) {
             STACK_PUSH_REF(frame, (void*)(uintptr_t)value);
         } else {
-            // For int or float, just copy the raw bits
             STACK_PUSH_INT(frame, value);
         }
         NEXT();
@@ -1715,7 +1707,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         FAIL_SET_JUMP(length >= 0, err, JERR_NEGATIVESIZE, exit);
 
-        //Extensive string fuckery (i hate it)
+        //Extensive string fuckery to properly create class for array (i hate it)
         char* element_name = stringpool_get(element_class->name_id);
         size_t element_name_length = strlen(element_name);
         size_t array_class_name_length = 2 + element_name_length;
@@ -2050,8 +2042,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_MONITORENTER:{
-        assert(ctx->thread && "Cannot be run from bootstrap context");
-
         FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP((err = monitor_enter((Object_t*)frame->stack[frame->sp - 1])) == JERR_OK, err, err, exit);
        
@@ -2060,8 +2050,6 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_MONITOREXIT:{
-        assert(ctx->thread && "Cannot be run from bootstrap context");
-        
         FAIL_SET_JUMP(SHADOW_GET_REF(frame->shadow_stack, frame->sp - 1), err, JERR_TYPECHECK_FAILURE, exit);
         FAIL_SET_JUMP((Object_t*)frame->stack[frame->sp - 1], err, JERR_NULLPOINTER, exit);
 
@@ -2097,9 +2085,9 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
     EJOPCODE_ATHROW:{
         thread_safepoint_check();
+        err = frame->stack[frame->sp - 1] ? JERR_EXCEPTION : JERR_NULLPOINTER;
 
-        Object_t* exception = STACK_POP_REF(frame);
-        err = exception ? JERR_EXCEPTION : JERR_NULLPOINTER;
+        goto exit;
     }
 
     EJOPCODE_NOP:

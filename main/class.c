@@ -947,13 +947,16 @@ static Error_t class_fixup(Class_t* this_class){
         FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
 
         implementation->methods_count = count_instance_methods(interface);
-        FAIL_SET_JUMP((implementation->methods = bumper_calloc(s_arena, implementation->methods_count, sizeof(*implementation->methods))), err, JERR_OOM, exit);
+        FAIL_SET_JUMP((implementation->vtable_index = bumper_calloc(s_arena, implementation->methods_count, sizeof(*implementation->vtable_index))), err, JERR_OOM, exit);
 
         unsigned iindex = 0;
         for(unsigned j = 0; j < interface->methods.count; j++){
             Method_t* imethod = &interface->methods.methods[j];
             if(imethod->flags.is_virtual){
-                FAIL_SET_JUMP((implementation->methods[iindex] = class_find_method(this_class, imethod->name_id)), err, JERR_NOTFOUND, exit);
+                Method_t* impl_method = class_find_method(this_class, imethod->name_id);
+                FAIL_SET_JUMP(impl_method, err, JERR_NOSUCHMETHOD, exit);
+
+                implementation->vtable_index[iindex] = impl_method->vtable_index;
                 imethod->interface_index = iindex;
                 iindex++; //This should really be same every time
             }
@@ -1037,6 +1040,7 @@ static Error_t class_link(Class_t* class){
 
                     }
                 }
+                FAIL_SET_JUMP(!parent->flags.is_interface, err, JERR_TYPECHECK_FAILURE, exit);
                 to_discover->parent = parent; //Add it as parent
 
             } else to_discover->parent = NULL; //java.lang.Object
