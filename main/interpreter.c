@@ -1426,17 +1426,15 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         FAIL_SET_JUMP(!template->flags.is_static, err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = NULL;
-        if(!template->flags.is_static){
-            for(Class_t* cur = object_class; cur; cur = cur->parent){ //We must do this
-                for(unsigned i = 0; i < cur->implements.count; i++){
-                    Implementation_t* implementation = &cur->implements.implementations[i];
-                    if(implementation->interface == template->class){
-                        method = object_class->vtable[implementation->vtable_index[template->interface_index]]; //Using upmost class here
-                        goto found;
-                    }
+        for(Class_t* cur = object_class; cur; cur = cur->parent){ //We must do this (otherwise we can miss that parent implement interface)
+            for(unsigned i = 0; i < cur->implements.count; i++){
+                Implementation_t* implementation = &cur->implements.implementations[i];
+                if(implementation->interface == template->class){
+                    method = object_class->vtable[implementation->vtable_index[template->interface_index]]; //Using upmost class here
+                    goto found;
                 }
             }
-        } else method = template;
+        }
 
         found:
         FAIL_SET_JUMP(method, err, JERR_NOSUCHMETHOD, exit);
