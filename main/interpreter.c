@@ -1424,11 +1424,10 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         Class_t* object_class = object->class;
         FAIL_SET_JUMP(!template->flags.is_static, err, JERR_TYPECHECK_FAILURE, exit);
-        FAIL_SET_JUMP(class_is_compatible(object_class, template->class), err, JERR_TYPECHECK_FAILURE, exit);
 
         Method_t* method = NULL;
         if(!template->flags.is_static){
-            for(Class_t* cur = object_class; cur; cur = cur->parent){
+            for(Class_t* cur = object_class; cur; cur = cur->parent){ //We must do this
                 for(unsigned i = 0; i < cur->implements.count; i++){
                     Implementation_t* implementation = &cur->implements.implementations[i];
                     if(implementation->interface == template->class){
