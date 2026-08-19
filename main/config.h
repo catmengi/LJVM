@@ -25,14 +25,15 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #define KB * 1024
 #define MB * 1024 * 1024
 
-#define VM_ARENA_SIZE (4096 + 256) KB //Memory allocated for whole VM (+ memory for sub arena metadata)
-
 #define VM_PERMA_ARENA_SIZE ((1024 + 512) KB)
-#define VM_LINKER_TMP_ARENA_SIZE 256 KB
-#define VM_PARSER_ARENA_SIZE 256 KB
-#define VM_GC_ARENA_SIZE 2 MB
+#define VM_LINKER_TMP_ARENA_SIZE (256 KB)
+#define VM_PARSER_ARENA_SIZE (256 KB)
+#define VM_GC_ARENA_SIZE (2 MB)
+
 #define STRINGPOOL_ENTRY_ITEMS_COUNT 1024
 #define CLASSTABLE_ENTRY_ITEMS_COUNT 1024
+
+#define VM_ARENA_SIZE VM_PERMA_ARENA_SIZE + VM_LINKER_TMP_ARENA_SIZE + VM_GC_ARENA_SIZE + VM_PARSER_ARENA_SIZE + (256 KB)
 
 #define VM_PERMA_ARENA_ID 15923
 #define VM_LINKER_TMP_ARENA_ID 6647

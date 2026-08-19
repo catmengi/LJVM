@@ -54,7 +54,10 @@ JRawClass_t* loader_load_class(char* name){
     ClassStream_t stream = {0};
     if(init_classtream(name, &stream)) return NULL;
 
-    return parser_parse_class(&stream);
+    JRawClass_t* parsed = parser_parse_class(&stream);
+
+    classstream_close(&stream);
+    return parsed;
 }
 
 int loader_set_apppath(char* path){

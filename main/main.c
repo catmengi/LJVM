@@ -18,10 +18,8 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "config.h"
-#include "interpreter.h"
 #include "stringpool.h"
 #include "class.h"
-#include "thread.h"
 
 #include <assert.h>
 #include "loader.h"
@@ -36,12 +34,13 @@ int app_main(){
     Class_t* main_class = NULL;
     assert(class_load_bynameid(stringpool_add("JEspressoTest"), &main_class) == JERR_OK);
 
-    Method_t* main = class_find_method(main_class, stringpool_add("debug@()V"));
+    Method_t* main = class_find_method(main_class, stringpool_add("main@([Ljava/lang/String;)V"));
     assert(main);
 
-    thread_start_exec(thread_alloc(NULL), main, NULL);
+    Class_t* system = NULL;
+    assert(class_load_bynameid(stringpool_add("java/lang/System"), &system) == JERR_OK);
 
-    pthread_exit(NULL);
+
     return 0;
 }
 

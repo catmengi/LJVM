@@ -286,8 +286,8 @@ typedef enum {
     EJOPCODE_BREAKPOINT     = 0xca,
 
     // 0xcb-0xfd are unused
-    EJOPCODE_INTERPRETEREXIT        = 0xfe,
-    EJOPCODE_IMPDEP2        = 0xff
+    EJOPCODE_FRAMEPOPREENTER = 0xfe,
+    EJOPCODE_IMPDEP2         = 0xff
 }JOpcode_t;
 
 static const uint8_t JOpcode_args_sizes[256] = {

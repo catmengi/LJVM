@@ -1,3 +1,22 @@
+/*
+JEspressoVM - project to bring java bytecode execution to esp32 (and others)
+
+Copyright (C) 2026  Vladislav Potrashkov
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; If not, see <http://www.gnu.org/licenses/>.
+*/
+
 package java.lang;
 
 import java.io.UnsupportedEncodingException;
@@ -128,6 +147,10 @@ public final class String{
         return getBytes();
     }
 
+    public int length(){
+        return string_chars.length;
+    }
+
     public static String valueOf(Object obj){
         return obj == null ? "null" : obj.toString();
     }
@@ -144,8 +167,16 @@ public final class String{
         return b ? "true" : "false";
     }
 
+    public static String valueOf(long l){
+        return "fuck you!";
+    }
+
     public static String valueOf(char c){
         char ca[] = new char[]{c};
         return new String(ca);
+    }
+
+    public static String valueOf(int i){
+        return java.lang.Integer.toString(i, 10).toString();
     }
 }

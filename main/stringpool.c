@@ -152,37 +152,3 @@ char* stringpool_get(int32_t name_id){
 
     return item ? item->cstr : NULL;
 }
-
-#include "class.h"
-#include "heap.h"
-#include "interpreter.h"
-
-Object_t* stringpool_get_java(Interpreter_t* ctx, int32_t name_id){
-    POOL_CRITICAL_ENTER(s_entry_list_guard);
-
-    StringpoolItem_t* item = find_slot(name_id);
-    assert(item && item->cstr);
-
-    Object_t* jstr = atomic_load(&item->jstr);
-    POOL_CRITICAL_EXIT(s_entry_list_guard);
-
-    if(!jstr){
-        Method_t* init = NULL;
-        Class_t* class = NULL;
-        FAIL_SET_JUMP(class_load_bynameid(stringpool_add("java/lang/String"), &class) == JERR_OK, jstr, NULL, exit);
-        FAIL_SET_JUMP(heap_class_object_alloc(class, &jstr) == JERR_OK, jstr, NULL, exit);
-
-        FAIL_SET_JUMP((init = class_find_method(class, stringpool_add("<init>@(I)V"))), jstr, NULL, exit); //TODO: java.lang.String support of name_id creating
-        FAIL_SET_JUMP(interpreter_method_invoke(ctx, init, (int32_t[2]){(uint32_t)jstr, name_id}, NULL) == JERR_OK, jstr, NULL, exit);
-
-        POOL_CRITICAL_ENTER(s_entry_list_guard);
-        if(!atomic_load(&item->jstr)){
-            atomic_store(&item->jstr, jstr);
-        } else jstr = atomic_load(&item->jstr);
-
-        POOL_CRITICAL_EXIT(s_entry_list_guard);
-    }
-    
-exit:
-    return jstr;
-}

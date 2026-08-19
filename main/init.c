@@ -21,8 +21,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "config.h"
 #include "parser.h"
 #include "stringpool.h"
-#include "interpreter.h"
-#include "heap.h"
 #include "monitor.h"
 #include "memman.h"
 #include "classtable.h"
@@ -38,9 +36,8 @@ void JEspresso_init(){
 
     stringpool_init();
     parser_init();
-    monitors_init();
-    heap_init();
+    //monitors_init();
     classtable_init();
     classes_init();
-    interpreter_init();
+    //interpreter_init();
 }

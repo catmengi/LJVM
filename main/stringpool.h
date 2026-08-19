@@ -22,7 +22,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <stdint.h>
 #include "list.h"
 #include "config.h"
-#include "interpreter.h"
 
 typedef struct Object_t Object_t;
 typedef struct{
@@ -39,4 +38,3 @@ typedef struct{
 void stringpool_init();
 int32_t stringpool_add(char* string);
 char* stringpool_get(int32_t index);
-Object_t* stringpool_get_java(Interpreter_t* ctx, int32_t name_id);

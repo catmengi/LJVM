@@ -24,10 +24,9 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "list.h"
 #include "jerror.h"
 #include "monitor.h"
-#include "interpreter.h"
 
-#define MAX_LOADED_CLASSES 1024
 typedef struct Class_t Class_t;
+typedef struct Interpreter_t Interpreter_t;
 
 typedef enum{
     TYPE_BYTE = 'B',
@@ -70,7 +69,6 @@ typedef struct{
 }ConstantPoolPatchSymbol_t;
 
 typedef struct{
-    atomic_flag spinlock; 
     SymbolType_t type;
     void* value;
 }ClassSymbol_t;
@@ -85,14 +83,19 @@ typedef struct{
     ClassSymbol_t* symbols;
 }ClassSymbolTable_t;
 
+typedef struct{
+    JavaValueType_t type;
+    ClassSymbol_t* info; //IF type is TYPE_REFERENCE, then this info must be populated with symbol pointing to class
+}FieldType_t;
+
 typedef struct Field_t{
     uint16_t name_id;
-    JavaValueType_t type; //Still store type separately for faster opcodes on resolved fields
+
+    Class_t* class;
+    FieldType_t type;
     size_t offset; //offset in bytes
     size_t size; //size in bytes
     
-    Class_t* class;
-
     struct{
         union{
             uint32_t flags;
@@ -131,15 +134,14 @@ typedef struct Method_t{
                 unsigned is_protected:1;
                 unsigned is_private:1;
                 unsigned is_abstract:1;
+
+                unsigned is_clinit:1; //Required for automatically set Method's class clinit_stage to 2
             };
         };
     }flags; 
 
     JavaValueType_t return_type;
-
-    unsigned args_slots; //SP offset
-    unsigned args_bitmap_size; //GC bitmap
-    uint32_t* args_bitmap;
+    int args_slots;
 
     void* code;
 }Method_t;
@@ -181,11 +183,11 @@ typedef struct{
     uint16_t max_locals;
 
     uint32_t code_length;
-    uint8_t* code;
+    uint8_t* code; //Code has already been patched, so every indice / offset in it will be in CPUs endiannes!
 
     size_t exception_count;
     MethodExceptionHandler_t* exceptions;
-    BytecodeVerifierInfo_t* verifier_info;
+    BytecodeVerifierInfo_t* verifier_info; //Just exists, no one uses it now
 }MethodBytecode_t;
 
 typedef struct{
@@ -206,8 +208,8 @@ typedef struct{
 typedef struct{
     Class_t* interface;
 
-    size_t methods_count;
-    int32_t* vtable_index; //Need for extension override
+    size_t count;
+    int32_t* vtable_indices; //Using vtable, cause children classes must be able to override implementations
 }Implementation_t;
 
 typedef struct{
@@ -230,20 +232,19 @@ typedef struct Class_t{
     //Class info
     uint16_t name_id;
     Class_t* parent;
-    ImplementsTable_t implements;
+    ImplementsTable_t implements; //Uses interface hierarchy flattening, so no complex walk required
     ClassSymbolTable_t symtab;
-    Object_t* class_object; //java.lang.Class instance
+    //Object_t* jlClass; //java.lang.Class instance
 
-    _Atomic(Thread_t*) clinit_trigger; //Thread that triggered clinit
-    atomic_int clinit_stage; //0 - not started, 1 - in progress, 2 - done
-    atomic_int link_stage; //TODO: refactor current linker and use it instead of a flag!
-                                //0 - not started, 1 - in progress, 2 - done
-
+    Thread_t* clinit_trigger; //Thread that triggered clinit
+    struct list_head clinit_waiters;
+    
+    int clinit_stage; //0 - not started, 1 - in progress, 2 - done
     struct{
         union{
             uint32_t flags;
             struct{
-                unsigned is_linked:1; //TODO: Refactor linker!
+                unsigned is_linked:1;
                 unsigned is_array:1;
                 unsigned is_interface:1;
                 unsigned is_final:1;
@@ -255,29 +256,28 @@ typedef struct Class_t{
     JavaValueType_t array_type; //Only usable if is_array == 1, other wise TYPE_VOID
 
     //Fields info
-    //Separated to simplify GC scan logic.
-    FieldTable_t instance_fields;
-    FieldTable_t static_fields;
+    FieldTable_t fields;
 
     size_t object_size; //Size of class data in BYTES (for easier allocation logic)
     void* sfields_storage; //Static fields storage
 
     //Method info
-    //TODO: methods structure
     MethodTable_t methods;
 
     size_t vtable_size;
     Method_t** vtable;
+    Method_t* clinit; //Cached for future uses. Maybe NULL
 }Class_t;
 
 void classes_init(); //Not to be called by user!
 
-Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol);
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
 
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);
 bool class_is_subclass(Class_t* is_subclass, Class_t* to);
 
-Field_t* class_find_static_field(Class_t* class, uint16_t name_id);
-Field_t* class_find_instance_field(Class_t* class, uint16_t name_id);
+Field_t* class_find_field(Class_t* class, uint16_t name_id);
+
+Error_t class_read_static_field(Class_t* class, Field_t* field, void* output);
+Error_t class_write_static_field(Class_t* class, Field_t* field, void* input);

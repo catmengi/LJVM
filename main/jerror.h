@@ -21,6 +21,7 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 typedef enum{
     JERR_OK,
+
     JERR_OOM,
     JERR_BADPARAM,
     JERR_NOTFOUND,
@@ -41,7 +42,9 @@ typedef enum{
     JERR_INCOMPATIBLECLASSCHANGE,
     JERR_INSTANTIATION,
     JERR_NEGATIVESIZE,
+    JERR_AINDEXOOB,
     JERR_INDEXOOB,
+    JERR_ARRAYSTORE,
     JERR_CAST,
     JERR_STACKOVERFLOW,
 

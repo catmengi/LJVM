@@ -20,68 +20,22 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include "config.h"
 
 #include "class.h"
-#include "interpreter.h"
 #include "jerror.h"
 #include "list.h"
 #include "loader.h"
 #include "parser.h"
 #include "bumper.h"
 #include "stringpool.h"
-#include "native_methods_service.h"
-#include "thread.h"
-#include "heap.h"
 #include "memman.h"
 #include "classtable.h"
 
 #include <assert.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
-#define SPINLOCK_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
-#define SPINLOCK_EXIT(spinlock) atomic_flag_clear(&(spinlock))
-
 static bump_allocator_t *s_arena = NULL, *s_link_arena = NULL;
 
-//========================== PREEMTIVE SUPPORT 
-#ifdef TARGET_ESPIDF
-#include "freertos/freeRTOS.h"
-#include "freertos/sem.h"
-static SemaphoreHandle_t s_class_lock = NULL;
-#else
-#include <pthread.h>
-static pthread_mutex_t s_class_lock = {0};
-#endif
-
-static void class_enter_critical(){
-    #ifdef TARGET_LINUX
-    pthread_mutex_lock(&s_class_lock);
-    #else
-    xSemaphoreTakeRecursive(s_class_lock, portMAX_DELAY);
-    #endif
-}
-
-static void class_exit_critical(){
-    #ifdef TARGET_LINUX
-    pthread_mutex_unlock(&s_class_lock);
-    #else
-    xSemaphoreGiveRecursive(s_class_lock);
-    #endif    
-}
-
-//=================================================
-
 void classes_init(){
-    #ifdef TARGET_LINUX
-    pthread_mutexattr_t attr = {0};
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&s_class_lock, &attr);
-    #else
-    s_class_lock = xSemaphoreCreateRecursiveMutex();
-    assert(s_class_lock);
-    #endif
-
     assert((s_arena = memman_get(VM_PERMA_ARENA_ID)));
     assert((s_link_arena = memman_get(VM_LINKER_TMP_ARENA_ID)));
 }
@@ -106,7 +60,6 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     assert(out);
     Error_t err = JERR_OK;
 
-    class_enter_critical();
     if((*out = classtable_get(name_id))) goto exit;
 
     char* string_name = stringpool_get(name_id);
@@ -133,10 +86,6 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
         array_class->vtable_size = jlObject->vtable_size;
         array_class->object_size = jlObject->object_size;
 
-        Class_t* jlClass = NULL;
-        FAIL_SET_JUMP((err = class_load_bynameid(stringpool_add("java/lang/Class"),  &jlClass)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &array_class->class_object)) == JERR_OK, err, err, exit);
-
         array_class->flags.is_linked = 1;
         array_class->flags.is_array = 1;
 
@@ -148,7 +97,6 @@ Error_t class_load_bynameid(uint16_t name_id, Class_t** out){
     }
 
 exit:
-    class_exit_critical();
     return err;
 }
 
@@ -326,9 +274,37 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
 
             case EJOPCODE_LOOKUPSWITCH:
             case EJOPCODE_TABLESWITCH:
-                assert(0 && "TODO: switches");
+            case EJOPCODE_WIDE:
+                assert(0 && "TODO: switches and wide");
 
-            case EJOPCODE_INVOKEINTERFACE:
+            case EJOPCODE_SIPUSH: //endian conversion
+            case EJOPCODE_GOTO:
+            case EJOPCODE_JSR:
+            case EJOPCODE_IF_ACMPEQ:
+            case EJOPCODE_IF_ACMPNE:
+            case EJOPCODE_IF_ICMPEQ:
+            case EJOPCODE_IF_ICMPGE:
+            case EJOPCODE_IF_ICMPGT:
+            case EJOPCODE_IF_ICMPLE:
+            case EJOPCODE_IF_ICMPLT:
+            case EJOPCODE_IF_ICMPNE:
+            case EJOPCODE_IFEQ:
+            case EJOPCODE_IFNE:
+            case EJOPCODE_IFGE:
+            case EJOPCODE_IFGT:
+            case EJOPCODE_IFLT:
+            case EJOPCODE_IFLE:
+            case EJOPCODE_IFNULL:
+            case EJOPCODE_IFNONNULL:
+                *(int16_t*)(opcode + 1) = be16_to_cpu(*(int16_t*)(opcode + 1));
+                break;
+
+            case EJOPCODE_GOTO_W:
+            case EJOPCODE_JSR_W:
+                *(int32_t*)(opcode + 1) = be32_to_cpu(*(int32_t*)(opcode + 1));
+                break;
+
+            case EJOPCODE_INVOKEINTERFACE: //CP to symtab patching + endian conversion
             case EJOPCODE_INSTANCEOF:
             case EJOPCODE_CHECKCAST:
             case EJOPCODE_ANEWARRAY:
@@ -343,11 +319,11 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
             case EJOPCODE_GETFIELD:
             case EJOPCODE_PUTSTATIC:
             case EJOPCODE_PUTFIELD:{
-                *((uint16_t*)(opcode + 1)) = cpu_to_be16(find_patched_symbol_index(be16_to_cpu(*(uint16_t*)(opcode + 1)), &metadata->cp_patch_list));
+                *((uint16_t*)(opcode + 1)) = find_patched_symbol_index(be16_to_cpu(*(uint16_t*)(opcode + 1)), &metadata->cp_patch_list);
             }
             break;
 
-            case EJOPCODE_LDC:{
+            case EJOPCODE_LDC:{ //CP to symtab patching
                 *((uint8_t*)(opcode + 1)) = find_patched_symbol_index(*(opcode + 1), &metadata->cp_patch_list);
             }
             break;
@@ -355,7 +331,7 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
     }
 }
 
-static Error_t parse_method_descriptor(const char* descriptor, JavaValueType_t* arguments_size, JavaValueType_t* return_type){
+static Error_t parse_method_descriptor(const char* descriptor, int* arguments_size, JavaValueType_t* return_type){
     Error_t err = JERR_OK;
     
     FAIL_SET_JUMP(descriptor && return_type && arguments_size, err, JERR_BADPARAM, exit);
@@ -437,79 +413,6 @@ exit:
     return err;
 }
 
-static Error_t generate_method_locals_bitmap(const char* descriptor,
-                                             bool is_virtual,
-                                             uint32_t* bitmap)
-{
-    if (!descriptor || *descriptor != '(')
-        return JERR_BADPARAM;
-
-    // start after '('
-    const char* p = descriptor + 1;
-
-    unsigned slot = 0;
-
-    // 'this' for virtual methods
-    if (is_virtual) {
-        SHADOW_SET_REF(bitmap, slot);
-        slot++;
-    }
-
-    // parameter list
-    while (*p && *p != ')') {
-        switch (*p) {
-            case 'B':
-            case 'C':
-            case 'F':
-            case 'I':
-            case 'S':
-            case 'Z':
-                slot += 1;
-                p++;
-                break;
-
-            case 'D':
-            case 'J':
-                slot += 2;
-                p++;
-                break;
-
-            case 'L':
-                // reference type: set ref bit, skip to ';'
-                SHADOW_SET_REF(bitmap, slot);
-                slot++;
-                p = strchr(p, ';');
-                if (!p) return JERR_BADPARAM;
-                p++;   // move past ';'
-                break;
-
-            case '[':
-                // array type: set ref bit, then skip element type
-                SHADOW_SET_REF(bitmap, slot);
-                slot++;
-                p++;   // skip '['
-                while (*p == '[') p++;   // multi-dim array
-                if (*p == 'L') {
-                    p = strchr(p, ';');
-                    if (!p) return JERR_BADPARAM;
-                    p++;
-                } else {
-                    p++;  // primitive element
-                }
-                break;
-
-            default:
-                return JERR_BADPARAM;
-        }
-    }
-
-    if (*p != ')')
-        return JERR_BADPARAM;
-
-    // return type not needed for locals bitmap
-    return JERR_OK;
-}
-
 static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     Error_t err = JERR_OK;
     FAIL_SET_JUMP(parsed_class, err, JERR_NOCLASSDEF, exit);
@@ -539,9 +442,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->flags.is_interface = (parsed_class->flags & ACC_INTERFACE) == ACC_INTERFACE;
     this_class->flags.is_final = (parsed_class->flags & ACC_FINAL) == ACC_FINAL;
     this_class->flags.is_abstract = (parsed_class->flags & ACC_ABSTRACT) == ACC_ABSTRACT;
+    this_class->flags.is_linked = 0;
     //this_class->spinlock = (atomic_flag)ATOMIC_FLAG_INIT;
     this_class->clinit_stage = 0;
-    this_class->link_stage = 0;
 
     ClassLinkTimeMetadata_t* metadata = bumper_calloc(s_link_arena, 1, sizeof(*metadata));
     FAIL_SET_JUMP(metadata, err, JERR_OOM, exit);
@@ -565,6 +468,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
     INIT_LIST_HEAD(&this_class->list[0]);
     INIT_LIST_HEAD(&this_class->list[1]);
+    INIT_LIST_HEAD(&this_class->clinit_waiters);
 
     this_class->metadata = metadata;
     this_class->name_id = this_name_id;
@@ -574,26 +478,18 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     FAIL_SET_JUMP(patch_constantpool(this_class, &metadata->cp_patch_list, constantpool) == 0, err, JERR_OOM, exit);
 
     //Field initalisation
-    size_t fields_count[2] = {0}; //0 - instance, 1 - static
-    for(unsigned i = 0; i < parsed_class->fields_count; i++){
-        fields_count[(parsed_class->fields[i].flags & ACC_STATIC) == ACC_STATIC]++;
-    }
 
-    this_class->static_fields.count = fields_count[1];
-    this_class->instance_fields.count = fields_count[0];
-    this_class->instance_fields.fields = bumper_calloc(s_arena, this_class->instance_fields.count, sizeof(*this_class->instance_fields.fields));
-    this_class->static_fields.fields = bumper_calloc(s_arena, this_class->static_fields.count, sizeof(*this_class->static_fields.fields));
+    this_class->fields.count = parsed_class->fields_count;
+    this_class->fields.fields = bumper_calloc(s_arena, this_class->fields.count, sizeof(*this_class->fields.fields));
 
-    FAIL_SET_JUMP(this_class->instance_fields.fields && this_class->static_fields.fields, err, JERR_OOM, exit); 
+    FAIL_SET_JUMP(this_class->fields.fields, err, JERR_OOM, exit); 
 
-    unsigned field_index[2] = {0};
     size_t offsets[2] = {0};
     for(unsigned i = 0; i < parsed_class->fields_count; i++){
         JRawField_t* raw_field = &parsed_class->fields[i];
         bool is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC;
 
-        Field_t* field_array = is_static ? this_class->static_fields.fields : this_class->instance_fields.fields;
-        Field_t* field = &field_array[field_index[is_static]++];
+        Field_t* field = &this_class->fields.fields[i];
 
         JConstant_t* raw_field_descriptor = parser_constantpool_get(constantpool, raw_field->descriptor_index);
         JConstant_t* raw_field_name = parser_constantpool_get(constantpool, raw_field->name_index);
@@ -610,8 +506,29 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         snprintf(mangled_name, mangled_len, "%s@%s", raw_field_name_cstr, raw_field_descriptor_cstr);
 
         field->class = this_class;
-        field->type = raw_field_descriptor_utf8->string[0] == '[' ? TYPE_REFERENCE : raw_field_descriptor_utf8->string[0];
-        field->size = field->type == TYPE_LONG || field->type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
+        field->type.type = raw_field_descriptor_utf8->string[0] == '[' ? TYPE_REFERENCE : raw_field_descriptor_utf8->string[0];
+        if(field->type.type == TYPE_REFERENCE){
+            FieldType_t* type = &field->type;
+            FAIL_SET_JUMP((type->info = bumper_calloc(s_arena, 1, sizeof(*type->info))), err, JERR_OOM, exit);
+
+            ClassProxySymbol_t* proxy = NULL;
+            FAIL_SET_JUMP((proxy = type->info->value = bumper_calloc(s_arena, 1, sizeof(ClassProxySymbol_t))), err, JERR_OOM, exit);
+
+            char class_name[strlen(raw_field_descriptor_cstr)];
+            char* cn = class_name;
+            char* fdc = raw_field_descriptor_cstr + 1;
+
+            while(*fdc && *fdc != ';'){
+                *(cn++) = *(fdc++);
+            }
+
+            *cn = '\0';
+
+            type->info->type = PROXY_SYMBOL_CLASS;
+            proxy->origin_name_id = stringpool_add(class_name); //Creating field type symbol manually
+        }
+
+        field->size = field->type.type == TYPE_LONG || field->type.type == TYPE_DOUBLE ? sizeof(int64_t) : sizeof(int32_t);
 
         field->offset = offsets[is_static];
         offsets[is_static] += field->size;
@@ -667,6 +584,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         method->flags.is_virtual = !(is_static || is_special);
         method->flags.is_special = is_special;
 
+        method->flags.is_clinit = strcmp((char*)((JRawUTF8_t*)parser_constantpool_get(constantpool, raw_method->name_index)->value)->string, "<clinit>") == 0;
         
         method->class = this_class;
 
@@ -692,13 +610,9 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         
         FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type)) == JERR_OK, err, err, exit);
         method->args_slots += !method->flags.is_static;
-        method->args_bitmap_size = (method->args_slots + 31) / 32; //32 bits in uint32_t.......
-        FAIL_SET_JUMP((method->args_bitmap = bumper_calloc(s_arena, method->args_bitmap_size, sizeof(*method->args_bitmap))), err, JERR_OOM, exit);
        
-        FAIL_SET_JUMP((err = generate_method_locals_bitmap(raw_method_descriptor_cstr, !method->flags.is_static, method->args_bitmap)) == JERR_OK, err, err, exit); 
-
         if(method->flags.is_native){
-            FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
+            //FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
         } else {
             JRawAttribute_t* attribute = NULL;
             list_for_each_entry(attribute, &raw_method->attributes, list){
@@ -771,6 +685,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         }
     }
 
+    this_class->clinit = class_find_method(this_class, stringpool_add("<clinit>@()V"));
     *out = this_class;
 
 exit:
@@ -798,92 +713,15 @@ Method_t* class_find_method(Class_t* class, uint16_t name_id){
 
     return NULL;
 }
-
-Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
+Field_t* class_find_field(Class_t* class, uint16_t name_id){
     for(Class_t* cur = class; cur; cur = cur->parent){
-        for(unsigned i = 0; i < cur->static_fields.count; i++){
-            Field_t* field = &cur->static_fields.fields[i];
+        for(unsigned i = 0; i < cur->fields.count; i++){
+            Field_t* field = &cur->fields.fields[i];
             if(field->name_id == name_id)
                 return field;
         }
     }
     return NULL;
-}
-
-Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
-    for(Class_t* cur = class; cur; cur = cur->parent){
-        for(unsigned i = 0; i < cur->instance_fields.count; i++){
-            Field_t* field = &cur->instance_fields.fields[i];
-            if(field->name_id == name_id)
-                return field;
-        }
-    }
-    return NULL;
-}
-
-Error_t jstringpool_get(uint16_t name_id, Object_t** output);
-Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
-    Error_t err = JERR_OK;
-
-    SPINLOCK_ENTER(symbol->spinlock);
-    ClassProxySymbol_t* proxy_symbol = symbol->value;
-    if(symbol->type < PROXY_SYMBOL_CLASS) goto exit;
-
-    
-    Class_t* location = NULL;
-    FAIL_SET_JUMP((err = class_load_bynameid(proxy_symbol->origin_name_id, &location)) == JERR_OK,err,err,exit);
-
-    switch(symbol->type){
-        case PROXY_SYMBOL_CLASS:{
-            symbol->type = SYMBOL_CLASS;
-            symbol->value = location;
-        }
-        break;
-
-        case PROXY_SYMBOL_FIELD:{
-            symbol->type = SYMBOL_FIELD;
-            symbol->value = (symbol->value = class_find_static_field(location, proxy_symbol->self_name_id)) ? 
-                            symbol->value : class_find_instance_field(location, proxy_symbol->self_name_id);
-            FAIL_SET_JUMP(symbol->value, err, JERR_NOSUCHFIELD, exit);
-
-            Field_t* field = symbol->value;
-            if(!field->flags.is_public && thread_self_get()){
-                if(field->flags.is_protected){
-                    FAIL_SET_JUMP(class_is_subclass(ctx->frame->method->class, field->class), err, JERR_ILLEGALACCESS, exit);
-                } else if(field->flags.is_private){
-                    FAIL_SET_JUMP(ctx->frame->method->class == field->class, err, JERR_ILLEGALACCESS, exit);
-                }
-            }
-        }
-        break;
-
-        case PROXY_SYMBOL_METHOD:{
-            symbol->type = SYMBOL_METHOD;
-            FAIL_SET_JUMP((symbol->value = class_find_method(location, proxy_symbol->self_name_id)), err, JERR_NOSUCHMETHOD, exit);
-
-            Method_t* method = symbol->value;
-            if(!method->flags.is_public && thread_self_get()){
-                if(method->flags.is_protected){
-                    FAIL_SET_JUMP(class_is_subclass(ctx->frame->method->class, method->class), err, JERR_ILLEGALACCESS, exit);
-                } else if(method->flags.is_private){
-                    FAIL_SET_JUMP(ctx->frame->method->class == method->class, err, JERR_ILLEGALACCESS, exit);
-                }
-            }
-        }
-        break;
-
-        case PROXY_SYMBOL_STRING:{
-            assert((symbol->value = stringpool_get_java(ctx, proxy_symbol->self_name_id)));
-            symbol->type = SYMBOL_STRING;
-        }
-        break;
-
-        default: break;
-    }
-
-exit:
-    SPINLOCK_EXIT(symbol->spinlock);
-    return err;
 }
 
 static unsigned count_instance_methods(Class_t* class){
@@ -896,16 +734,18 @@ static unsigned count_instance_methods(Class_t* class){
 
 static Error_t class_fixup(Class_t* this_class){
     Error_t err = JERR_OK;
-    static Class_t* jlClass = NULL;
 
     Class_t* parent = this_class->parent;
     FAIL_SET_JUMP((parent && !parent->flags.is_final) || !parent, err, JERR_TYPECHECK_FAILURE, exit);
 
     //Fix field offsets
     this_class->object_size += parent ? parent->object_size : 0;
-    size_t field_offset_fixup = parent ? (parent->object_size / sizeof(int32_t)) : 0;
-    for(unsigned i = 0; i < this_class->instance_fields.count; i++){
-        this_class->instance_fields.fields[i].offset += field_offset_fixup;
+    size_t field_offset_fixup = parent ? parent->object_size : 0;
+    for(unsigned i = 0; i < this_class->fields.count; i++){
+        Field_t* field = &this_class->fields.fields[i];
+        if(!field->flags.is_static){
+            field->offset += field_offset_fixup;
+        }
     }
 
     //Generate vtable
@@ -946,8 +786,8 @@ static Error_t class_fixup(Class_t* this_class){
 
         FAIL_SET_JUMP(interface->flags.is_interface, err, JERR_BADPARAM, exit);
 
-        implementation->methods_count = count_instance_methods(interface);
-        FAIL_SET_JUMP((implementation->vtable_index = bumper_calloc(s_arena, implementation->methods_count, sizeof(*implementation->vtable_index))), err, JERR_OOM, exit);
+        implementation->count = count_instance_methods(interface);
+        FAIL_SET_JUMP((implementation->vtable_indices = bumper_calloc(s_arena, implementation->count, sizeof(*implementation->vtable_indices))), err, JERR_OOM, exit);
 
         unsigned iindex = 0;
         for(unsigned j = 0; j < interface->methods.count; j++){
@@ -956,7 +796,7 @@ static Error_t class_fixup(Class_t* this_class){
                 Method_t* impl_method = class_find_method(this_class, imethod->name_id);
                 FAIL_SET_JUMP(impl_method, err, JERR_NOSUCHMETHOD, exit);
 
-                implementation->vtable_index[iindex] = impl_method->vtable_index;
+                implementation->vtable_indices[iindex] = impl_method->vtable_index;
                 imethod->interface_index = iindex;
                 iindex++; //This should really be same every time
             }
@@ -966,23 +806,10 @@ static Error_t class_fixup(Class_t* this_class){
     this_class->metadata = NULL; //Its linked, but we still need to create java/lang/Class (it fucks up if i move this to function end)
     this_class->flags.is_linked = 1;
     FAIL_SET_JUMP((err = classtable_put(this_class)) == JERR_OK, err, err, exit);
-
-    Field_t* nativeClassPointer_field = NULL;
-    if(!jlClass){
-        FAIL_SET_JUMP((err = class_convert_from_raw(loader_load_class("java/lang/Class"),&jlClass)) == JERR_OK, err, err, exit);
-        FAIL_SET_JUMP((jlClass->parent = classtable_get(stringpool_add("java/lang/Object"))), err, JERR_NOCLASSDEF, exit);
-        FAIL_SET_JUMP((err = class_fixup(jlClass)) == JERR_OK, err, err, exit);
-    }
-
-    FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
-    FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
-
-    void* fields = NULL;
-    FAIL_SET_JUMP((err = heap_class_object_get_fields(this_class->class_object, &fields)) == JERR_OK, err, err, exit);
-    *(Class_t**)(fields + nativeClassPointer_field->offset) = jlClass;
 exit:
     return err;
 }
+
 static Class_t* class_linktime_lookup(int32_t nameid, struct list_head* list){
     Class_t* class = NULL;
     list_for_each_entry(class, list, list[1]){
@@ -1004,7 +831,6 @@ static Class_t* class_linktime_lookup0(int32_t nameid, struct list_head* list){
 //java.lang.Object cannot implement any interfaces with this linker!
 static Error_t class_link(Class_t* class){
     Error_t err = JERR_OK;
-    class_enter_critical();
 
     LIST_HEAD(discovery_list); //List of classes that need to be discovered for loading
     LIST_HEAD(required_list); //List of all classes that class_link loaded
@@ -1145,7 +971,6 @@ static Error_t class_link(Class_t* class){
 
     bumper_reset(s_link_arena);
 exit:
-    class_exit_critical();
     return err;
 }
 
@@ -1168,4 +993,38 @@ bool class_is_subclass(Class_t* is_subclass, Class_t* to){
     }
 
     return false;
+}
+
+Error_t class_read_static_field(Class_t* class, Field_t* field, void* output){
+    assert(field->flags.is_static);
+    
+    void* item = (class->sfields_storage + field->offset);
+    switch(field->type.type){
+        default:
+            memcpy(output, item, field->size);
+            break;
+
+        case TYPE_REFERENCE:
+            assert(0 && "TODO:");
+            //*(Object_t**)output = OBJ_INCREF(*(Object_t**)item);
+            break;
+    }
+    return JERR_OK;
+}
+
+Error_t class_write_static_field(Class_t* class, Field_t* field, void* input){
+    assert(field->flags.is_static);
+
+    void* item = (class->sfields_storage + field->offset);
+    switch(field->type.type){
+        default:
+            memcpy(item, input, field->size);
+            break;
+
+        case TYPE_REFERENCE:
+            assert(0 && "TODO:");
+            //*(Object_t**)item = OBJ_INCREF(*(Object_t**)output);
+            break;
+    }
+    return JERR_OK;
 }

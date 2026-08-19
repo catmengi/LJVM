@@ -34,6 +34,8 @@ typedef struct{
     int (*readU64)(void* readdata, uint64_t* output);
     int (*readBUF)(void* readdata, uint8_t* output, size_t size);
     int (*skip)(void* readdata, size_t n);
+
+    void (*close)(void* readdata);
 }ClassStream_t;
 
 typedef struct{
@@ -47,9 +49,9 @@ int classstream_readU32(ClassStream_t* stream, uint32_t* output);
 int classstream_readU64(ClassStream_t* stream, uint64_t* output);
 int classstream_readBUF(ClassStream_t* stream, uint8_t* output, size_t size);
 int classstream_skip(ClassStream_t* stream, size_t n);
+void classstream_close(ClassStream_t* stream);
 //=========================================================================
 
 int classstream_init_file(ClassStream_t* stream, FILE* file);
-int classstream_init_memstream(ClassStream_t* stream, memstream_t* memstream);
 
 void memstream_init(memstream_t* memstream, uint8_t* buffer, size_t size);

@@ -21,33 +21,18 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 
 #include <stdint.h>
 #include "list.h"
-#include "jerror.h"
-
-#include <stdatomic.h>
 
 typedef struct Thread_t Thread_t;
 typedef struct Object_t Object_t;
 typedef struct Monitor_t{
-    atomic_flag spinlock; 
-
-    struct list_head list;
+    struct list_head list; //Allocation list
     struct list_head enter_set; //list of threads that awaiting the objects unlocking
-    struct list_head wait_set; //Object.wait()
+
+    struct list_head wait_set; //Object.wait(). On notify thread should be deleted from this list, pending_enter must be set
+                               //to THIS monitor and added back into scheduler. On its scheduling it must check is pending_enter non NULL
+                               //if so, it must enter this monitor, and then if thread must be yieled(monitor is owned), scheduler should execute next availible thread
 
     Object_t* owner_object;
     Thread_t* owner;
     uint32_t recursion;
 }Monitor_t;
-
-void monitors_init();
-
-Error_t monitor_enter(Object_t* object);
-Error_t monitor_exit(Monitor_t* monitor);
-Error_t monitor_exit_force(Monitor_t* monitor);
-
-Error_t monitor_wait(Object_t* object);
-Error_t monitor_waitTimeout(Object_t* object,int64_t timeout);
-Error_t monitor_notify(Object_t* object);
-Error_t monitor_notifyAll(Object_t* object);
-
-void monitor_free(Object_t* object);
