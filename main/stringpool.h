@@ -26,7 +26,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 typedef struct Object_t Object_t;
 typedef struct{
     char* cstr;
-    _Atomic(Object_t*) jstr;
 }StringpoolItem_t;
 
 typedef struct{
@@ -36,5 +35,9 @@ typedef struct{
 }StringpoolEntry_t;
 
 void stringpool_init();
+
+//Return: ID of "string" inside stringpool or negative value on error (-1)
 int32_t stringpool_add(char* string);
+
+//Return: null-terminated string that associated with ID("index") or NULL
 char* stringpool_get(int32_t index);

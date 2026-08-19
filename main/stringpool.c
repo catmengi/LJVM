@@ -32,7 +32,6 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 static bump_allocator_t* s_arena = NULL;
 
 static struct list_head s_entry_list = {0};
-static atomic_flag s_entry_list_guard = ATOMIC_FLAG_INIT;
 static size_t s_entry_count = 0;
 
 #define POOL_CRITICAL_ENTER(spinlock) ({while(atomic_flag_test_and_set(&(spinlock))){}})
@@ -43,7 +42,6 @@ void stringpool_init(){
     assert((s_arena = memman_get(VM_PERMA_ARENA_ID)));
 
     INIT_LIST_HEAD(&s_entry_list);
-    s_entry_list_guard = (atomic_flag)ATOMIC_FLAG_INIT;
     s_entry_count = 0;
 
     assert(insert_entry());  //Add initial entry (other wise it wouldnt work)
@@ -95,8 +93,6 @@ static uint32_t djb2_hash(char *str) {
 int32_t stringpool_add(char* string){
     if(!string) return -1;
 
-    POOL_CRITICAL_ENTER(s_entry_list_guard);
-
     uint32_t nameid_offset = 0, n = 0;
     unsigned start_pos = djb2_hash(string) % STRINGPOOL_ENTRY_ITEMS_COUNT;
 
@@ -112,14 +108,11 @@ insert:
             if(item->cstr == NULL){
                 item->cstr = bumper_strdup(s_arena, string);
                 if(!item->cstr){
-                    POOL_CRITICAL_EXIT(s_entry_list_guard);
                     return -1;
                 }
 
-                POOL_CRITICAL_EXIT(s_entry_list_guard);
                 return index + nameid_offset;
             } else if(strcmp(item->cstr, string) == 0){
-                POOL_CRITICAL_EXIT(s_entry_list_guard);
                 return index + nameid_offset;
             }
         }
@@ -129,7 +122,6 @@ insert:
         if(++n == s_entry_count){ 
             StringpoolEntry_t* new = insert_entry();
             if(!new){
-                POOL_CRITICAL_EXIT(s_entry_list_guard);
                 return -1;
             } else {
                 entry = new; //goto go brrrrrrrr
@@ -138,17 +130,11 @@ insert:
         }
     }
 
-    POOL_CRITICAL_EXIT(s_entry_list_guard);
     return -1;
 }
 
 //THREAD SAFE
 char* stringpool_get(int32_t name_id){
-    POOL_CRITICAL_ENTER(s_entry_list_guard);
-
     StringpoolItem_t* item = find_slot(name_id);
-
-    POOL_CRITICAL_EXIT(s_entry_list_guard);
-
     return item ? item->cstr : NULL;
 }

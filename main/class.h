@@ -44,38 +44,31 @@ typedef enum{
 typedef enum{
     SYMBOL_NONE,
 
-    SYMBOL_CLASS = 1,
-    SYMBOL_STRING,
-    SYMBOL_INT,
-    SYMBOL_FLOAT,
-    SYMBOL_LONG,
-    SYMBOL_DOUBLE,
-    SYMBOL_METHOD,
-    SYMBOL_FIELD,
+    SYMBOL_CLASS = 1, //Class_t*
+    SYMBOL_STRING, //Object_t*
+    SYMBOL_INT, //int32_t*
+    SYMBOL_FLOAT, //float*
+    SYMBOL_LONG, //int64_t*
+    SYMBOL_DOUBLE, //double*
+    SYMBOL_METHOD, //Method_t*
+    SYMBOL_FIELD, //Field_t*
 
-    //Proxy symbol are to be resolved in runtime
+    //Proxy symbol are to be resolved in runtime. ClassProxySymbol_t*
     PROXY_SYMBOL_CLASS = 10,
     PROXY_SYMBOL_STRING,
     PROXY_SYMBOL_METHOD,
     PROXY_SYMBOL_FIELD,
     //================================================
-
 }SymbolType_t;
 
 typedef struct{
-    struct list_head list; //Since this probably gonna be inside temporary arena, we might use a list
-    unsigned cp_index;
-    unsigned symtab_index;
-}ConstantPoolPatchSymbol_t;
-
-typedef struct{
     SymbolType_t type;
-    void* value;
+    void* value; //Where it points to is decided by "type"
 }ClassSymbol_t;
 
 typedef struct{
-    uint16_t origin_name_id;
-    uint16_t self_name_id;
+    uint16_t origin_name_id; //name_id of class where this symbol lies.
+    uint16_t self_name_id; //name_id of symbol that lies at origin. INVALID for PROXY_SYMBOL_CLASS. Must be decided what lies by ClassSymbol_t->type
 }ClassProxySymbol_t;
 
 typedef struct{
@@ -86,15 +79,16 @@ typedef struct{
 typedef struct{
     JavaValueType_t type;
     ClassSymbol_t* info; //IF type is TYPE_REFERENCE, then this info must be populated with symbol pointing to class
-}FieldType_t;
+}ValueType_t;
 
 typedef struct Field_t{
     uint16_t name_id;
 
-    Class_t* class;
-    FieldType_t type;
+    ValueType_t type;
     size_t offset; //offset in bytes
     size_t size; //size in bytes
+
+    Class_t* class; //Owner class of this field
     
     struct{
         union{
@@ -115,10 +109,10 @@ typedef struct Field_t{
 
 typedef struct Method_t{
     uint16_t name_id;
-    uint16_t vtable_index;
-    uint16_t interface_index;
+    uint16_t vtable_index; //Index to class->vtable
+    uint16_t interface_index; //Index to Implementation_t->vtable_indices;
 
-    Class_t* class;
+    Class_t* class; //Owner class of this method
     
     struct{
         union{
@@ -140,10 +134,12 @@ typedef struct Method_t{
         };
     }flags; 
 
-    JavaValueType_t return_type;
-    int args_slots;
+    ValueType_t return_type;
 
-    void* code;
+    int return_slots; //same as args_slots but for return value
+    int args_slots; //Number of uint32_t slots that method require as arguments. INCLUDES this FOR NON STATIC METHODS
+
+    void* code; //Pointer to MethodBytecode_t or to future native method descriptor
 }Method_t;
 
 typedef struct{
@@ -196,16 +192,6 @@ typedef struct{
 }MethodTable_t;
 
 typedef struct{
-    uint8_t is_root; //Only set to 1 if class have no parent!
-    uint16_t parent_name_id;
-    
-    size_t implements_count;
-    uint16_t* implements; //name_ids
-
-    struct list_head cp_patch_list;
-}ClassLinkTimeMetadata_t;
-
-typedef struct{
     Class_t* interface;
 
     size_t count;
@@ -217,16 +203,9 @@ typedef struct{
     Implementation_t* implementations;
 }ImplementsTable_t;
 
-typedef struct{
-    uint16_t interface_name_id; 
-    uint16_t itable_index;
-}ClassIMethodSymbol_t;
-
 typedef struct Class_t{
-    //atomic_flag spinlock;
-
     //Linker info
-    void* metadata;
+    void* metadata; //Pointer to ClassLinkTimeMetadata_t. SHOULD NOT BE TOUCHED BY ANYONE EXPECT CLASS GENERATING CODE
     struct list_head list[2]; //Required for link-time hierarchy building
 
     //Class info
@@ -237,7 +216,7 @@ typedef struct Class_t{
     //Object_t* jlClass; //java.lang.Class instance
 
     Thread_t* clinit_trigger; //Thread that triggered clinit
-    struct list_head clinit_waiters;
+    struct list_head clinit_waiters; //List for syncronization of clinit invokers
     
     int clinit_stage; //0 - not started, 1 - in progress, 2 - done
     struct{
@@ -265,19 +244,37 @@ typedef struct Class_t{
     MethodTable_t methods;
 
     size_t vtable_size;
-    Method_t** vtable;
-    Method_t* clinit; //Cached for future uses. Maybe NULL
+    Method_t** vtable; 
+    Method_t* clinit; //Cached for future uses. can be NULL
 }Class_t;
 
 void classes_init(); //Not to be called by user!
 
+//Return: class related JERRs or JERR_OK
+//name_id: ID of string inside stringpool (stringpool_add(""))
+//out: where to store pointer to loaded / found classes
 Error_t class_load_bynameid(uint16_t name_id, Class_t** out);
 
+//Return: pointer to Method_t with name == name_id inside Class or NULL
+//Class: class where to search method
+//name_id: ID of string inside stringpool (stringpool_add(""))
 Method_t* class_find_method(Class_t* class, uint16_t name_id);
+
+//Return: is class compatible to assign with compatible_to
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);
+
+//Return: is "is_subclass" is subclass of "to"
 bool class_is_subclass(Class_t* is_subclass, Class_t* to);
 
+//Return: pointer to Field_t with name == name_id inside Class or NULL
 Field_t* class_find_field(Class_t* class, uint16_t name_id);
 
-Error_t class_read_static_field(Class_t* class, Field_t* field, void* output);
-Error_t class_write_static_field(Class_t* class, Field_t* field, void* input);
+//Return: error that occured or JERR_OK
+//Field: field to read / write. Class will be retrieved from it
+
+//output: pointer to block of memory where to store field contents
+Error_t class_read_static_field(Field_t* field, void* output);
+
+//input: pointer to block of memory that must be copied into field
+Error_t class_write_static_field(Field_t* field, void* input);
+//=======================================

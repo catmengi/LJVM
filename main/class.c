@@ -33,6 +33,24 @@ along with this program; If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <string.h>
 
+//Internal data structures
+typedef struct{
+    struct list_head list; //Since this probably gonna be inside temporary arena, we might use a list
+    unsigned cp_index;
+    unsigned symtab_index;
+}ConstantPoolPatchSymbol_t;
+
+typedef struct{
+    uint8_t is_root; //Only set to 1 if class have no parent!
+    uint16_t parent_name_id;
+    
+    size_t implements_count;
+    uint16_t* implements; //name_ids
+
+    struct list_head cp_patch_list;
+}ClassLinkTimeMetadata_t;
+//==========================
+
 static bump_allocator_t *s_arena = NULL, *s_link_arena = NULL;
 
 void classes_init(){
@@ -508,7 +526,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
         field->class = this_class;
         field->type.type = raw_field_descriptor_utf8->string[0] == '[' ? TYPE_REFERENCE : raw_field_descriptor_utf8->string[0];
         if(field->type.type == TYPE_REFERENCE){
-            FieldType_t* type = &field->type;
+            ValueType_t* type = &field->type;
             FAIL_SET_JUMP((type->info = bumper_calloc(s_arena, 1, sizeof(*type->info))), err, JERR_OOM, exit);
 
             ClassProxySymbol_t* proxy = NULL;
@@ -608,9 +626,14 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
 
         method->name_id = name_id;
         
-        FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type)) == JERR_OK, err, err, exit);
+        FAIL_SET_JUMP((err = parse_method_descriptor(raw_method_descriptor_cstr,&method->args_slots,&method->return_type.type)) == JERR_OK, err, err, exit);
         method->args_slots += !method->flags.is_static;
+        method->return_slots = method->return_type.type == TYPE_VOID ? 0 : method->return_type.type == TYPE_LONG || method->return_type.type == TYPE_DOUBLE ? 2 : 1;
        
+        if(method->return_type.type == TYPE_REFERENCE){
+            printf("TODO: generating return type symbol!\n");
+        }
+
         if(method->flags.is_native){
             //FAIL_SET_JUMP((method->code = natives_find(stringpool_get(this_class->name_id), mangled_name)), err, JERR_NOTFOUND, exit);
         } else {
@@ -995,10 +1018,10 @@ bool class_is_subclass(Class_t* is_subclass, Class_t* to){
     return false;
 }
 
-Error_t class_read_static_field(Class_t* class, Field_t* field, void* output){
+Error_t class_read_static_field(Field_t* field, void* output){
     assert(field->flags.is_static);
     
-    void* item = (class->sfields_storage + field->offset);
+    void* item = (field->class->sfields_storage + field->offset);
     switch(field->type.type){
         default:
             memcpy(output, item, field->size);
@@ -1012,10 +1035,10 @@ Error_t class_read_static_field(Class_t* class, Field_t* field, void* output){
     return JERR_OK;
 }
 
-Error_t class_write_static_field(Class_t* class, Field_t* field, void* input){
+Error_t class_write_static_field(Field_t* field, void* input){
     assert(field->flags.is_static);
 
-    void* item = (class->sfields_storage + field->offset);
+    void* item = (field->class->sfields_storage + field->offset);
     switch(field->type.type){
         default:
             memcpy(item, input, field->size);
