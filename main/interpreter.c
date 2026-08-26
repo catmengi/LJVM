@@ -1036,7 +1036,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         NEXT();
 
     EJOPCODE_SIPUSH:
-        STACK_PUSH_INT(frame, (int32_t)(int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)));
+        STACK_PUSH_INT(frame, (int32_t)*(int16_t*)(frame->pc + 1));
         NEXT();
 
     // ========== RETURNS ==========
@@ -1129,7 +1129,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
     // ========== FIELD ACCESS ==========
     EJOPCODE_PUTSTATIC: {
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1173,7 +1173,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_GETSTATIC: {
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1217,7 +1217,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
     
     EJOPCODE_GETFIELD:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1261,7 +1261,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_PUTFIELD:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_FIELD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1311,7 +1311,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_INVOKESPECIAL:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1341,7 +1341,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_INVOKESTATIC:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_TYPECHECK_FAILURE, exit);
 
@@ -1373,7 +1373,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_INVOKEVIRTUAL:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
@@ -1412,7 +1412,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_INVOKEINTERFACE:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_METHOD, err, JERR_BADPARAM, exit);
 
@@ -1467,7 +1467,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         thread_safepoint_check();\
         int32_t v2 = STACK_POP_INT(frame); \
         int32_t v1 = STACK_POP_INT(frame); \
-        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)); \
+        int16_t offset = *(int16_t*)(frame->pc + 1); \
         if (v1 OP v2) {frame->pc += offset; goto *opcode_labels[*frame->pc];}\
         NEXT(); \
     })
@@ -1548,14 +1548,14 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_GOTO:{
         thread_safepoint_check();
 
-        frame->pc += (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        frame->pc += *(int16_t*)(frame->pc + 1);
         goto *opcode_labels[*frame->pc];
     }
 
     EJOPCODE_GOTO_W:{
         thread_safepoint_check();
 
-        frame->pc += (int32_t)be32_to_cpu(*(int32_t*)(frame->pc + 1));
+        frame->pc += *(int32_t*)(frame->pc + 1);
         goto *opcode_labels[*frame->pc];
     }
 
@@ -1563,7 +1563,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         thread_safepoint_check();
 
         STACK_PUSH_INT(frame, (int32_t)(uintptr_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc])));
-        frame->pc += (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        frame->pc += *(int16_t*)(frame->pc + 1);
         goto *opcode_labels[*frame->pc];
     }
 
@@ -1571,7 +1571,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
         thread_safepoint_check();
 
         STACK_PUSH_INT(frame, (int32_t)(uintptr_t)(frame->pc + (1 + JOpcode_args_sizes[*frame->pc])));
-        frame->pc += (int32_t)be32_to_cpu(*(int32_t*)(frame->pc + 1));
+        frame->pc += *(int32_t*)(frame->pc + 1);
         goto *opcode_labels[*frame->pc];
     }
 
@@ -1621,7 +1621,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
     EJOPCODE_LDC2_W:
     EJOPCODE_LDC_W:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
 
         switch(sym->type){
@@ -1648,7 +1648,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_NEW:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
 
@@ -1695,7 +1695,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     EJOPCODE_ANEWARRAY:{
         thread_safepoint_check();
 
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
 
@@ -2024,7 +2024,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
     EJOPCODE_IFNULL:{
         if(STACK_POP_REF(frame) == NULL){
-            frame->pc += (int16_t)be16_to_cpu(*(uint16_t*)(frame->pc + 1));
+            frame->pc += *(int16_t*)(frame->pc + 1);
             goto *opcode_labels[*frame->pc];
         } 
         NEXT();
@@ -2032,7 +2032,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
     EJOPCODE_IFNONNULL:{
         if(STACK_POP_REF(frame) != NULL){
-            frame->pc += (int16_t)be16_to_cpu(*(uint16_t*)(frame->pc + 1));
+            frame->pc += *(int16_t*)(frame->pc + 1);
             goto *opcode_labels[*frame->pc];
         } 
         NEXT();
@@ -2057,7 +2057,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_INSTANCEOF:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
 
@@ -2069,7 +2069,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     }
 
     EJOPCODE_CHECKCAST:{
-        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[be16_to_cpu(*(uint16_t*)(frame->pc + 1))];
+        ClassSymbol_t* sym = &frame->method->class->symtab.symbols[*(uint16_t*)(frame->pc + 1)];
         FAIL_SET_JUMP((err = class_resolv_symbol(ctx, sym)) == JERR_OK, err, err, exit);
         FAIL_SET_JUMP(sym->type == SYMBOL_CLASS, err, JERR_BADPARAM, exit);
         
@@ -2480,7 +2480,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         void* ref2 = STACK_POP_REF(frame);
         void* ref1 = STACK_POP_REF(frame);
-        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        int16_t offset = *(int16_t*)(frame->pc + 1);
         if (ref1 == ref2) {
             frame->pc += offset;
             goto *opcode_labels[*frame->pc];
@@ -2493,7 +2493,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
 
         void* ref2 = STACK_POP_REF(frame);
         void* ref1 = STACK_POP_REF(frame);
-        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1));
+        int16_t offset = *(int16_t*)(frame->pc + 1);
         if (ref1 != ref2) {
             frame->pc += offset;
             goto *opcode_labels[*frame->pc];
@@ -2504,7 +2504,7 @@ Error_t interpreter_execute(Interpreter_t* ctx){
     #define IF_ZERO(OP) ({ \
         thread_safepoint_check();\
         int32_t v = STACK_POP_INT(frame); \
-        int16_t offset = (int16_t)be16_to_cpu(*(int16_t*)(frame->pc + 1)); \
+        int16_t offset = *(int16_t*)(frame->pc + 1); \
         if (v OP 0) { \
             frame->pc += offset; \
             goto *opcode_labels[*frame->pc]; \

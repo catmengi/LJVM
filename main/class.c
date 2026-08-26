@@ -326,9 +326,37 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
 
             case EJOPCODE_LOOKUPSWITCH:
             case EJOPCODE_TABLESWITCH:
-                assert(0 && "TODO: switches");
+            case EJOPCODE_WIDE:
+                assert(0 && "TODO: switches and wide");
 
-            case EJOPCODE_INVOKEINTERFACE:
+            case EJOPCODE_SIPUSH: //endian conversion
+            case EJOPCODE_GOTO:
+            case EJOPCODE_JSR:
+            case EJOPCODE_IF_ACMPEQ:
+            case EJOPCODE_IF_ACMPNE:
+            case EJOPCODE_IF_ICMPEQ:
+            case EJOPCODE_IF_ICMPGE:
+            case EJOPCODE_IF_ICMPGT:
+            case EJOPCODE_IF_ICMPLE:
+            case EJOPCODE_IF_ICMPLT:
+            case EJOPCODE_IF_ICMPNE:
+            case EJOPCODE_IFEQ:
+            case EJOPCODE_IFNE:
+            case EJOPCODE_IFGE:
+            case EJOPCODE_IFGT:
+            case EJOPCODE_IFLT:
+            case EJOPCODE_IFLE:
+            case EJOPCODE_IFNULL:
+            case EJOPCODE_IFNONNULL:
+                *(int16_t*)(opcode + 1) = be16_to_cpu(*(int16_t*)(opcode + 1));
+                break;
+
+            case EJOPCODE_GOTO_W:
+            case EJOPCODE_JSR_W:
+                *(int32_t*)(opcode + 1) = be32_to_cpu(*(int32_t*)(opcode + 1));
+                break;
+
+            case EJOPCODE_INVOKEINTERFACE: //CP to symtab patching + endian conversion
             case EJOPCODE_INSTANCEOF:
             case EJOPCODE_CHECKCAST:
             case EJOPCODE_ANEWARRAY:
@@ -343,11 +371,11 @@ static void patch_bytecode(Class_t* class, MethodBytecode_t* bytecode){
             case EJOPCODE_GETFIELD:
             case EJOPCODE_PUTSTATIC:
             case EJOPCODE_PUTFIELD:{
-                *((uint16_t*)(opcode + 1)) = cpu_to_be16(find_patched_symbol_index(be16_to_cpu(*(uint16_t*)(opcode + 1)), &metadata->cp_patch_list));
+                *((uint16_t*)(opcode + 1)) = find_patched_symbol_index(be16_to_cpu(*(uint16_t*)(opcode + 1)), &metadata->cp_patch_list);
             }
             break;
 
-            case EJOPCODE_LDC:{
+            case EJOPCODE_LDC:{ //CP to symtab patching
                 *((uint8_t*)(opcode + 1)) = find_patched_symbol_index(*(opcode + 1), &metadata->cp_patch_list);
             }
             break;

@@ -181,7 +181,8 @@ typedef struct{
     uint16_t max_locals;
 
     uint32_t code_length;
-    uint8_t* code;
+    uint8_t* code; //Bytecode is PATCHED AT LOADING. Everything bigENDIAN is converted to CPU's endianness
+                   //CP indices are CONVERTED into symtab indices!
 
     size_t exception_count;
     MethodExceptionHandler_t* exceptions;
