@@ -184,7 +184,7 @@ thread_task(void* params){
     Field_t* VMThread_field = NULL;
     void* jlThread_storage = NULL;
     if(thread->jlThread){
-        if((VMThread_field = class_find_instance_field(thread->jlThread->class, stringpool_add("VMThread@J")))){
+        if((VMThread_field = class_find_field(thread->jlThread->class, stringpool_add("VMThread@J")))){
             if(heap_class_object_get_fields(thread->jlThread, &jlThread_storage) == JERR_OK){
                 __atomic_store_n((int64_t*)(jlThread_storage + VMThread_field->offset), 0, __ATOMIC_SEQ_CST);
             }

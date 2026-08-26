@@ -243,7 +243,7 @@ typedef struct Class_t{
         union{
             uint32_t flags;
             struct{
-                unsigned is_linked:1; //TODO: Refactor linker!
+                unsigned is_linked:1;
                 unsigned is_array:1;
                 unsigned is_interface:1;
                 unsigned is_final:1;
@@ -256,8 +256,7 @@ typedef struct Class_t{
 
     //Fields info
     //Separated to simplify GC scan logic.
-    FieldTable_t instance_fields;
-    FieldTable_t static_fields;
+    FieldTable_t fields;
 
     size_t object_size; //Size of class data in BYTES (for easier allocation logic)
     void* sfields_storage; //Static fields storage
@@ -279,5 +278,4 @@ Method_t* class_find_method(Class_t* class, uint16_t name_id);
 bool class_is_compatible(Class_t* class, Class_t* compatible_to);
 bool class_is_subclass(Class_t* is_subclass, Class_t* to);
 
-Field_t* class_find_static_field(Class_t* class, uint16_t name_id);
-Field_t* class_find_instance_field(Class_t* class, uint16_t name_id);
+Field_t* class_find_field(Class_t* class, uint16_t name_id);

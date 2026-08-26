@@ -574,26 +574,16 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     FAIL_SET_JUMP(patch_constantpool(this_class, &metadata->cp_patch_list, constantpool) == 0, err, JERR_OOM, exit);
 
     //Field initalisation
-    size_t fields_count[2] = {0}; //0 - instance, 1 - static
-    for(unsigned i = 0; i < parsed_class->fields_count; i++){
-        fields_count[(parsed_class->fields[i].flags & ACC_STATIC) == ACC_STATIC]++;
-    }
+    this_class->fields.count = parsed_class->fields_count;
+    this_class->fields.fields = bumper_calloc(s_arena, this_class->fields.count, sizeof(*this_class->fields.fields));
 
-    this_class->static_fields.count = fields_count[1];
-    this_class->instance_fields.count = fields_count[0];
-    this_class->instance_fields.fields = bumper_calloc(s_arena, this_class->instance_fields.count, sizeof(*this_class->instance_fields.fields));
-    this_class->static_fields.fields = bumper_calloc(s_arena, this_class->static_fields.count, sizeof(*this_class->static_fields.fields));
+    FAIL_SET_JUMP(this_class->fields.fields, err, JERR_OOM, exit); 
 
-    FAIL_SET_JUMP(this_class->instance_fields.fields && this_class->static_fields.fields, err, JERR_OOM, exit); 
-
-    unsigned field_index[2] = {0};
     size_t offsets[2] = {0};
     for(unsigned i = 0; i < parsed_class->fields_count; i++){
         JRawField_t* raw_field = &parsed_class->fields[i];
         bool is_static = (raw_field->flags & ACC_STATIC) == ACC_STATIC;
-
-        Field_t* field_array = is_static ? this_class->static_fields.fields : this_class->instance_fields.fields;
-        Field_t* field = &field_array[field_index[is_static]++];
+        Field_t* field = &this_class->fields.fields[i];
 
         JConstant_t* raw_field_descriptor = parser_constantpool_get(constantpool, raw_field->descriptor_index);
         JConstant_t* raw_field_name = parser_constantpool_get(constantpool, raw_field->name_index);
@@ -642,7 +632,7 @@ static Error_t class_convert_from_raw(JRawClass_t* parsed_class, Class_t** out){
     this_class->sfields_storage = bumper_calloc(s_arena, 1, offsets[1]);
     FAIL_SET_JUMP(this_class->sfields_storage, err, JERR_OOM, exit);
 
-    this_class->object_size = offsets[0] * sizeof(int32_t); //Will will use this also on linker stage to calculate proper offsets
+    this_class->object_size = offsets[0]; //Will will use this also on linker stage to calculate proper offsets
 
     this_class->methods.count = parsed_class->methods_count;
     this_class->methods.methods = bumper_calloc(s_arena, this_class->methods.count, sizeof(*this_class->methods.methods));
@@ -799,21 +789,10 @@ Method_t* class_find_method(Class_t* class, uint16_t name_id){
     return NULL;
 }
 
-Field_t* class_find_static_field(Class_t* class, uint16_t name_id){
+Field_t* class_find_field(Class_t* class, uint16_t name_id){
     for(Class_t* cur = class; cur; cur = cur->parent){
-        for(unsigned i = 0; i < cur->static_fields.count; i++){
-            Field_t* field = &cur->static_fields.fields[i];
-            if(field->name_id == name_id)
-                return field;
-        }
-    }
-    return NULL;
-}
-
-Field_t* class_find_instance_field(Class_t* class, uint16_t name_id){
-    for(Class_t* cur = class; cur; cur = cur->parent){
-        for(unsigned i = 0; i < cur->instance_fields.count; i++){
-            Field_t* field = &cur->instance_fields.fields[i];
+        for(unsigned i = 0; i < cur->fields.count; i++){
+            Field_t* field = &cur->fields.fields[i];
             if(field->name_id == name_id)
                 return field;
         }
@@ -842,8 +821,7 @@ Error_t class_resolv_symbol(Interpreter_t* ctx, ClassSymbol_t* symbol){
 
         case PROXY_SYMBOL_FIELD:{
             symbol->type = SYMBOL_FIELD;
-            symbol->value = (symbol->value = class_find_static_field(location, proxy_symbol->self_name_id)) ? 
-                            symbol->value : class_find_instance_field(location, proxy_symbol->self_name_id);
+            symbol->value = class_find_field(location, proxy_symbol->self_name_id);
             FAIL_SET_JUMP(symbol->value, err, JERR_NOSUCHFIELD, exit);
 
             Field_t* field = symbol->value;
@@ -903,9 +881,12 @@ static Error_t class_fixup(Class_t* this_class){
 
     //Fix field offsets
     this_class->object_size += parent ? parent->object_size : 0;
-    size_t field_offset_fixup = parent ? (parent->object_size / sizeof(int32_t)) : 0;
-    for(unsigned i = 0; i < this_class->instance_fields.count; i++){
-        this_class->instance_fields.fields[i].offset += field_offset_fixup;
+    size_t field_offset_fixup = parent ? parent->object_size : 0;
+    for(unsigned i = 0; i < this_class->fields.count; i++){
+        Field_t* field = &this_class->fields.fields[i];
+        if(!field->flags.is_static){
+            field->offset += field_offset_fixup;
+        }
     }
 
     //Generate vtable
@@ -975,7 +956,7 @@ static Error_t class_fixup(Class_t* this_class){
     }
 
     FAIL_SET_JUMP((err = heap_class_object_alloc(jlClass, &this_class->class_object)) == JERR_OK, err, err, exit);
-    FAIL_SET_JUMP((nativeClassPointer_field = class_find_instance_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
+    FAIL_SET_JUMP((nativeClassPointer_field = class_find_field(jlClass, stringpool_add("nativeClassPointer@I"))), err, JERR_NOTFOUND, exit);
 
     void* fields = NULL;
     FAIL_SET_JUMP((err = heap_class_object_get_fields(this_class->class_object, &fields)) == JERR_OK, err, err, exit);
@@ -1137,7 +1118,7 @@ static Error_t class_link(Class_t* class){
         int iindex = 0;
         Class_t* iface = NULL;
         list_for_each_entry(iface, &iface_required, list[0]){
-            to_link->implements.implementations[iindex++].interface = iface;
+            to_link->implements.implementations[iindex++].interface = iface; //Interface flattening
         }
 
         FAIL_SET_JUMP((err = class_fixup(to_link)) == JERR_OK, err, err, exit);

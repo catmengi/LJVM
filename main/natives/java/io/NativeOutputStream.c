@@ -37,9 +37,9 @@ static NativeMethodReturnValue_t ns_open(Interpreter_t* ctx, Method_t* method, i
     assert(heap_class_object_get_fields(path, &storage) == JERR_OK);
     
     Field_t *value = NULL, *count = NULL, *offset = NULL;
-    assert((value = class_find_instance_field(path->class, stringpool_add("value@[C"))));
-    assert((count = class_find_instance_field(path->class, stringpool_add("count@I"))));
-    assert((offset = class_find_instance_field(path->class, stringpool_add("offset@I"))));
+    assert((value = class_find_field(path->class, stringpool_add("value@[C"))));
+    assert((count = class_find_field(path->class, stringpool_add("count@I"))));
+    assert((offset = class_find_field(path->class, stringpool_add("offset@I"))));
 
     Object_t* char_array = *(Object_t**)(storage + value->offset);
 
@@ -72,7 +72,7 @@ static NativeMethodReturnValue_t ns_close(Interpreter_t* ctx, Method_t* method, 
     assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
 
     Field_t *fd = NULL;
-    assert((fd = class_find_instance_field(self->class, stringpool_add("fd@I"))));
+    assert((fd = class_find_field(self->class, stringpool_add("fd@I"))));
 
     close(*(int32_t*)(storage + fd->offset));
 
@@ -85,7 +85,7 @@ static NativeMethodReturnValue_t ns_flush(Interpreter_t* ctx, Method_t* method, 
     assert(heap_class_object_get_fields(self, &storage) == JERR_OK);
 
     Field_t *fd = NULL;
-    assert((fd = class_find_instance_field(self->class, stringpool_add("fd@I"))));
+    assert((fd = class_find_field(self->class, stringpool_add("fd@I"))));
 
     fsync(*(int32_t*)(storage + fd->offset));
 

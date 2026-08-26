@@ -247,9 +247,9 @@ static void gc_scan_classes(struct list_head* output_list){
                 }
 
                 void* sfields_storage = class->sfields_storage;
-                for(unsigned i = 0; i < class->static_fields.count; i++){
-                    Field_t* field = &class->static_fields.fields[i];
-                    if(field->type == TYPE_REFERENCE){
+                for(unsigned i = 0; i < class->fields.count; i++){
+                    Field_t* field = &class->fields.fields[i];
+                    if(field->flags.is_static && field->type == TYPE_REFERENCE){
                         Object_t* object = *(Object_t**)(sfields_storage + field->offset);
                         if(object && object->forward != GC_MARK_SENTINEL){
                             object->forward = GC_MARK_SENTINEL;
@@ -297,10 +297,10 @@ static void gc_scan(){
             if(!object->class->flags.is_array){
                 int32_t* storage = (int32_t*)((char*)object + sizeof(*object));
                 for(Class_t* cur = object->class; cur; cur = cur->parent){
-                    for(unsigned i = 0; i < cur->instance_fields.count; i++){
-                        Field_t* field = &cur->instance_fields.fields[i];
+                    for(unsigned i = 0; i < cur->fields.count; i++){
+                        Field_t* field = &cur->fields.fields[i];
 
-                        if(field->type == TYPE_REFERENCE){
+                        if(!field->flags.is_static && field->type == TYPE_REFERENCE){
                             Object_t* found = (Object_t*)storage[field->offset];
                             if(found && found->forward != GC_MARK_SENTINEL){
                                 found->forward = GC_MARK_SENTINEL;
@@ -411,9 +411,9 @@ static void gc_patch(struct list_head* live_list){
                 }
 
                 void* sfields_storage = class->sfields_storage;
-                for(unsigned i = 0; i < class->static_fields.count; i++){
-                    Field_t* field = &class->static_fields.fields[i];
-                    if(field->type == TYPE_REFERENCE){
+                for(unsigned i = 0; i < class->fields.count; i++){
+                    Field_t* field = &class->fields.fields[i];
+                    if(field->flags.is_static && field->type == TYPE_REFERENCE){
                         Object_t* object = *(Object_t**)(sfields_storage + field->offset);
                         if(object && object->forward != GC_MARK_SENTINEL){
                             *(Object_t**)(sfields_storage + field->offset) = object->forward;
@@ -441,10 +441,10 @@ static void gc_patch(struct list_head* live_list){
         if(!object->class->flags.is_array){
             int32_t* storage = (int32_t*)((char*)object + sizeof(*object));
             for(Class_t* cur = object->class; cur; cur = cur->parent){
-                for(unsigned i = 0; i < cur->instance_fields.count; i++){
-                    Field_t* field = &cur->instance_fields.fields[i];
+                for(unsigned i = 0; i < cur->fields.count; i++){
+                    Field_t* field = &cur->fields.fields[i];
 
-                    if(field->type == TYPE_REFERENCE){
+                    if(!field->flags.is_static && field->type == TYPE_REFERENCE){
                         Object_t* found = (Object_t*)storage[field->offset];
                         if(found && found->forward != GC_MARK_SENTINEL){
                             storage[field->offset] = (int32_t)found->forward;
